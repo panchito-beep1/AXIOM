@@ -1,2 +1,3 @@
 # AXIOM
-Wanted To rebrand from rgui since it was only to vibecode
+Wanted to rebrand from RGUI documentation here: 
+https://goatedc-o.gitbook.io/axiom-1
