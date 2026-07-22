@@ -17,7 +17,7 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2 --Anti detection improvements
+-- Axiom V5 Israeli.V2.1 --Anti detection improvements damn typos
 
 local RGui = {}
 RGui.__index = RGui
