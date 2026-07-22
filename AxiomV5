@@ -17,7 +17,7 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V1
+-- Axiom V5 Israeli.V2 --Anti detection improvements
 
 local RGui = {}
 RGui.__index = RGui
@@ -35,7 +35,7 @@ local UserInputService = cloneref(game:GetService("UserInputService"))
 local TweenService     = cloneref(game:GetService("TweenService"))
 local TextService      = cloneref(game:GetService("TextService"))
 local CoreGui          = cloneref(game:GetService("CoreGui"))
-local LocalPlayer      = Players.LocalPlayer
+local LocalPlayer      = cloneref(Players.LocalPlayer)
 
 -- ── Default Theme ─────────────────────────────────────────────────────────────
 RGui.DefaultTheme = {
@@ -1310,7 +1310,7 @@ function TabComponent:AddTextBox(text, placeholder, default, callback, optOption
 end
 
 function TabComponent:AddGraph(title, maxPoints, options)
-    local RunService = game:GetService("RunService")
+    local RunService = cloneref(game:GetService("RunService"))
     local theme      = getTheme(self)
  
     options = options or {}
@@ -1690,7 +1690,7 @@ function RGui:CreateKeySystem(config)
     scriptTitle.TextXAlignment = Enum.TextXAlignment.Left
     scriptTitle.Parent = leftPanel
 
-    -- Key input + copy button row
+    -- Key input +  button row
     local inputRow = Instance.new("Frame")
     inputRow.BackgroundTransparency = 1
     inputRow.Position = UDim2.new(0, 0, 0, 26)
@@ -1710,7 +1710,7 @@ function RGui:CreateKeySystem(config)
     applyCorner(keyInput, 2)
     applyBorder(keyInput, theme.Border)
 
-    local copyBtn = Instance.new("TextButton")
+    local Btn = Instance.new("TextButton")
     copyBtn.BackgroundColor3 = theme.FrameBg
     copyBtn.Size = UDim2.new(0, 24, 1, 0)
     copyBtn.Position = UDim2.new(1, -24, 0, 0)
@@ -1723,21 +1723,29 @@ function RGui:CreateKeySystem(config)
     applyCorner(copyBtn, 2)
     applyBorder(copyBtn, theme.Border)
 
-    copyBtn.MouseButton1Click:Connect(function()
-        local serviceData = services[selectedService]
-        local toCopy = serviceData.CopyLink or serviceData.CopyKey
-        if toCopy then
-            -- Use ClipboardService for reliability
-            game:GetService("ClipboardService"):SetClipboard(toCopy)
-            -- Visual feedback
-            copyBtn.BackgroundColor3 = theme.Accent
-            task.delay(0.2, function() copyBtn.BackgroundColor3 = theme.FrameBg end)
-            -- Show a quick “Copied!” notification
-            self:Notify("Copied!", "The key/link has been copied.", 2, {
-                Color = theme.Accent
-            })
+copyBtn.MouseButton1Click:Connect(function()
+    local serviceData = services[selectedService]
+    local toCopy = serviceData.CopyLink or serviceData.CopyKey
+    if toCopy then
+        -- Clipboard handling with executor-native functions first
+        if setclipboard then
+            setclipboard(toCopy)
+        elseif toclipboard then
+            toclipboard(toCopy)
+        else
+            warn("Clipboard function not available.")
         end
-    end)
+
+        -- Visual feedback
+        copyBtn.BackgroundColor3 = theme.Accent
+        task.delay(0.2, function() copyBtn.BackgroundColor3 = theme.FrameBg end)
+
+        -- Notification
+        self:Notify("Copied!", "The key/link has been copied.", 2, {
+            Color = theme.Accent
+        })
+    end
+end)
 
     -- Service dropdown
     local serviceBtn = Instance.new("TextButton")
@@ -2297,13 +2305,13 @@ function RGui.Config.new(name)
 
     -- Internal save helper
     local function saveToStorage(tbl)
-        local json = game:GetService("HttpService"):JSONEncode(tbl)
-        game:GetService("LocalStorageService"):SetItem("RGui_" .. name, json)
+        local json = cloneref(game:GetService("HttpService"):JSONEncode(tbl))
+        cloneref(game:GetService("LocalStorageService"):SetItem("RGui_" .. name, json))
     end
 
     -- Internal load helper
     local function loadFromStorage()
-        local json = game:GetService("LocalStorageService"):GetItem("RGui_" .. name)
+        local json = cloneref(game:GetService("LocalStorageService"):GetItem("RGui_" .. name))
         if json then
             local success, decoded = pcall(game.GetService(game, "HttpService").JSONDecode, game:GetService("HttpService"), json)
             if success and type(decoded) == "table" then
@@ -2407,8 +2415,8 @@ function TabComponent:AddViewport(title, options)
     local theme = getTheme(self)
     options = options or {}
 
-    local UserInputService = game:GetService("UserInputService")
-    local RunService = game:GetService("RunService")
+    local UserInputService = cloneref(game:GetService("UserInputService"))
+    local RunService = cloneref(game:GetService("RunService"))
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -2909,7 +2917,7 @@ end
 
 -- ── Tab:AddCollapsible(title) ──────────────────────────────────────────────
 function TabComponent:AddCollapsible(title)
-    local TweenService = game:GetService("TweenService")
+    local TweenService = cloneref(game:GetService("TweenService"))
     
     local theme = getTheme(self)
     local isOpen = true
