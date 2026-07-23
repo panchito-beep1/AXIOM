@@ -1710,16 +1710,16 @@ function RGui:CreateKeySystem(config)
     applyCorner(keyInput, 2)
     applyBorder(keyInput, theme.Border)
 
-    local Btn = Instance.new("TextButton")
-    Btn.BackgroundColor3 = theme.FrameBg
-    Btn.Size = UDim2.new(0, 24, 1, 0)
-    Btn.Position = UDim2.new(1, -24, 0, 0)
-    Btn.Font = Enum.Font.RobotoMono
-    Btn.Text = "📋"
-    Btn.TextColor3 = theme.Text
-    Btn.TextSize = 14
-    Btn.Visible = false
-    Btn.Parent = inputRow
+    local copyBtn = Instance.new("TextButton")
+    copyBtn.BackgroundColor3 = theme.FrameBg
+    copyBtn.Size = UDim2.new(0, 24, 1, 0)
+    copyBtn.Position = UDim2.new(1, -24, 0, 0)
+    copyBtn.Font = Enum.Font.RobotoMono
+    copyBtn.Text = "📋"
+    copyBtn.TextColor3 = theme.Text
+    copyBtn.TextSize = 14
+    copyBtn.Visible = false
+    copyBtn.Parent = inputRow
     applyCorner(copyBtn, 2)
     applyBorder(copyBtn, theme.Border)
 
