@@ -17,7 +17,7 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2.1 --Anti detection improvements damn typos AAaaa
+-- Axiom V5 Israeli.V2.1 --Anti detection improvements damn typos AAaaa I HAD TO EDIT THIS 101239732179I132972319723197231 TIMES
 
 local RGui = {}
 RGui.__index = RGui
@@ -1723,7 +1723,7 @@ function RGui:CreateKeySystem(config)
     applyCorner(copyBtn, 2)
     applyBorder(copyBtn, theme.Border)
 
-    Btn.MouseButton1Click:Connect(function()
+    copyBtn.MouseButton1Click:Connect(function()
     local serviceData = services[selectedService]
     local toCopy = serviceData.CopyLink or serviceData.CopyKey
     if toCopy then
