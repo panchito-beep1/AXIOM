@@ -16,7 +16,7 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2.2 – Complete with Full QoL Syntax
+-- Axiom V5 Israeli.V2.1 – Complete with File‑Based Config & Safe Clipboard
 -- All components return control objects with get/set/clear/add methods.
 
 local RGui = {}
@@ -26,6 +26,7 @@ local TabComponent = {}
 TabComponent.__index = TabComponent
 
 -- ── Services ──────────────────────────────────────────────────────────────────
+local cloneref = cloneref or clonereference or function(instance) return instance end
 local Players          = cloneref(game:GetService("Players"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
 local TweenService     = cloneref(game:GetService("TweenService"))
@@ -33,8 +34,6 @@ local TextService      = cloneref(game:GetService("TextService"))
 local CoreGui          = cloneref(game:GetService("CoreGui"))
 local RunService       = cloneref(game:GetService("RunService"))
 local HttpService      = cloneref(game:GetService("HttpService"))
-local LocalStorageService = cloneref(game:GetService("LocalStorageService"))
---local ClipboardService    = cloneref(game:GetService("ClipboardService"))
 local LocalPlayer      = cloneref(Players.LocalPlayer)
 
 -- ── Default Theme ─────────────────────────────────────────────────────────────
@@ -720,7 +719,6 @@ function TabComponent:AddDropdown(text, options, default, callback, optOptions)
             end)
             table.insert(optionButtons, optBtn)
         end
-        -- update sizes
         local totalHeight = #options * 22
         listFrame.Size = isOpen and UDim2.new(1, 0, 0, totalHeight) or UDim2.new(1, 0, 0, 0)
         if isOpen then
@@ -2035,7 +2033,12 @@ function RGui:CreateKeySystem(config)
         local serviceData = services[selectedService]
         local toCopy = serviceData.CopyLink or serviceData.CopyKey
         if toCopy then
-            ClipboardService:SetClipboard(toCopy)
+            -- Use setclipboard/toclipboard (standard exploit functions)
+            if setclipboard then
+                setclipboard(toCopy)
+            elseif toclipboard then
+                toclipboard(toCopy)
+            end
             copyBtn.BackgroundColor3 = theme.Accent
             task.delay(0.2, function() copyBtn.BackgroundColor3 = theme.FrameBg end)
             self:Notify("Copied!", "The key/link has been copied.", 2, { Color = theme.Accent })
@@ -2865,7 +2868,6 @@ function TabComponent:AddTable(headers, rows, options)
     function obj:SetData(newRows)
         for _, frame in ipairs(rowFrames) do frame:Destroy() end
         table.clear(rowFrames)
-        -- Rebuild rows
         for r, rowData in ipairs(newRows) do
             local rowFrame = Instance.new("Frame")
             rowFrame.BackgroundColor3 = r % 2 == 0 and theme.FrameBg or theme.WindowBg
@@ -3026,24 +3028,35 @@ function RGui:GetLucideIcon(name, options)
     return lucide:geticon(name, options or {})
 end
 
--- ── Configuration API ───────────────────────────────────────────────────────
+-- ── File‑Based Configuration API ────────────────────────────────────────────
 RGui.Config = {}
 
-function RGui.Config.new(name)
+function RGui.Config.new(folder, filename)
+    folder = folder or "Axiom"
+    filename = filename or "config.json"
+    local fullPath = folder .. "/" .. filename
+
     local self = {}
-    self._name = name
     self._data = {}
+
+    -- Ensure folder exists
+    if not isfolder(folder) then
+        makefolder(folder)
+    end
 
     local function saveToStorage(tbl)
         local json = HttpService:JSONEncode(tbl)
-        LocalStorageService:SetItem("RGui_" .. name, json)
+        writefile(fullPath, json)
     end
 
     local function loadFromStorage()
-        local json = LocalStorageService:GetItem("RGui_" .. name)
-        if json then
-            local success, decoded = pcall(function() return HttpService:JSONDecode(json) end)
-            if success and type(decoded) == "table" then return decoded end
+        if not isfile(fullPath) then
+            return {}
+        end
+        local json = readfile(fullPath)
+        local success, decoded = pcall(function() return HttpService:JSONDecode(json) end)
+        if success and type(decoded) == "table" then
+            return decoded
         end
         return {}
     end
