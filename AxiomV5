@@ -34,7 +34,7 @@ local CoreGui          = cloneref(game:GetService("CoreGui"))
 local RunService       = cloneref(game:GetService("RunService"))
 local HttpService      = cloneref(game:GetService("HttpService"))
 local LocalStorageService = cloneref(game:GetService("LocalStorageService"))
-local ClipboardService    = cloneref(game:GetService("ClipboardService"))
+--local ClipboardService    = cloneref(game:GetService("ClipboardService"))
 local LocalPlayer      = cloneref(Players.LocalPlayer)
 
 -- ── Default Theme ─────────────────────────────────────────────────────────────
