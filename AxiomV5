@@ -16,7 +16,7 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2.1 – Complete with Full QoL Syntax
+-- Axiom V5 Israeli.V2.2 – Complete with Full QoL Syntax
 -- All components return control objects with get/set/clear/add methods.
 
 local RGui = {}
@@ -26,7 +26,6 @@ local TabComponent = {}
 TabComponent.__index = TabComponent
 
 -- ── Services ──────────────────────────────────────────────────────────────────
-local cloneref = cloneref or clonereference or function(instance) return instance end
 local Players          = cloneref(game:GetService("Players"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
 local TweenService     = cloneref(game:GetService("TweenService"))
