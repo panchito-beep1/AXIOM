@@ -3090,4 +3090,66 @@ function RGui.Config.new(folder, filename)
     return self
 end
 
+-- ── Window:SetTheme(newTheme) ──────────────────────────────────────────────
+function RGui:SetTheme(newTheme)
+    local oldTheme = self._theme
+
+    local merged = {}
+    for k, v in pairs(RGui.DefaultTheme) do merged[k] = v end
+    if newTheme then
+        for k, v in pairs(newTheme) do merged[k] = v end
+    end
+    self._theme = merged
+
+    local oldMap = {}
+    for key, col in pairs(oldTheme) do
+        if typeof(col) == "Color3" then
+            oldMap[col] = key
+        end
+    end
+
+    local function scan(instance)
+        if instance:IsA("GuiObject") then
+            local oldBg = instance.BackgroundColor3
+            local key = oldMap[oldBg]
+            if key and merged[key] then
+                instance.BackgroundColor3 = merged[key]
+            end
+
+            if instance:IsA("TextLabel") or instance:IsA("TextButton") then
+                local oldTxt = instance.TextColor3
+                local txtKey = oldMap[oldTxt]
+                if txtKey and merged[txtKey] then
+                    instance.TextColor3 = merged[txtKey]
+                end
+            end
+
+            if instance:IsA("TextBox") then
+                local oldPH = instance.PlaceholderColor3
+                local phKey = oldMap[oldPH]
+                if phKey and merged[phKey] then
+                    instance.PlaceholderColor3 = merged[phKey]
+                end
+            end
+
+            local stroke = instance:FindFirstChildOfClass("UIStroke")
+            if stroke then
+                local oldStroke = stroke.Color
+                local strokeKey = oldMap[oldStroke]
+                if strokeKey and merged[strokeKey] then
+                    stroke.Color = merged[strokeKey]
+                end
+            end
+        end
+
+        for _, child in ipairs(instance:GetChildren()) do
+            scan(child)
+        end
+    end
+
+    if self._mainFrame then
+        scan(self._mainFrame)
+    end
+end
+
 return RGui
