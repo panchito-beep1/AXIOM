@@ -3091,6 +3091,62 @@ function RGui.Config.new(folder, filename)
     return self
 end
 
+-- ── Tab:AddImage(imageId, options) ──────────────────────────────────────────
+function TabComponent:AddImage(imageId, options)
+    local theme = getTheme(self)
+    options = options or {}          -- ✅ guard against nil
+    -- ✅ accept numbers, string numbers, or full rbxassetid URLs
+    if type(imageId) == "number" or tonumber(imageId) then
+        imageId = "rbxassetid://" .. tostring(imageId)
+    end
+    imageId = imageId or ""
+
+    local container = Instance.new("Frame")
+    container.BackgroundTransparency = 1
+    container.Size = options.Size or UDim2.new(0, 100, 0, 100)
+    container.LayoutOrder = self:_nextOrder()
+    container.Parent = self._page
+    applyCorner(container, options.CornerRadius or 2)
+    if options.Border and options.Border ~= false then
+        applyBorder(container, theme.Border)
+    end
+
+    local imgLabel = Instance.new("ImageLabel")
+    imgLabel.BackgroundTransparency = options.BackgroundTransparency or 1
+    imgLabel.Size = UDim2.new(1, 0, 1, 0)
+    imgLabel.Image = imageId
+    imgLabel.ScaleType = options.ScaleType or Enum.ScaleType.Fit
+    imgLabel.Parent = container
+    applyCorner(imgLabel, options.CornerRadius or 2)
+
+    local obj = {}
+    function obj:SetImage(id)
+        if type(id) == "number" or tonumber(id) then
+            id = "rbxassetid://" .. tostring(id)
+        end
+        imgLabel.Image = id
+    end
+    function obj:GetImage()
+        return imgLabel.Image
+    end
+    function obj:Update(opts)
+        opts = opts or {}   -- ✅ guard against nil
+        if opts.Size then container.Size = opts.Size end
+        if opts.ScaleType then imgLabel.ScaleType = opts.ScaleType end
+        if opts.BackgroundTransparency ~= nil then
+            imgLabel.BackgroundTransparency = opts.BackgroundTransparency
+        end
+        if opts.CornerRadius then
+            applyCorner(container, opts.CornerRadius)
+            applyCorner(imgLabel, opts.CornerRadius)
+        end
+    end
+    function obj:Destroy()
+        container:Destroy()
+    end
+    return obj
+end
+
 -- ── Window:SetTheme(newTheme) ──────────────────────────────────────────────
 function RGui:SetTheme(newTheme)
     local oldTheme = self._theme
