@@ -3147,6 +3147,195 @@ function TabComponent:AddImage(imageId, options)
     return obj
 end
 
+-- ── Tab:AddLayout(options) ─────────────────────────────────────────────────
+-- Returns a layout container that can hold components.
+-- options.Style: "Vertical" (default), "Horizontal", "Grid", "Absolute"
+-- options.Size, options.Position, options.BackgroundColor, etc.
+function TabComponent:AddLayout(options)
+    local theme = getTheme(self)
+    options = options or {}
+    local style = options.Style or "Vertical"
+
+    local container = Instance.new("Frame")
+    container.BackgroundTransparency = options.BackgroundTransparency or 1
+    container.BackgroundColor3 = options.BackgroundColor or theme.FrameBg
+    container.Size = options.Size or UDim2.new(1, -16, 0, 0)
+    container.Position = options.Position or UDim2.new(0, 8, 0, 0)
+    container.LayoutOrder = self:_nextOrder()
+    container.ClipsDescendants = true
+    container.Parent = self._page
+    applyCorner(container, 2)
+    applyBorder(container, theme.Border)
+
+    -- Internal layout object
+    local layout
+
+    if style == "Vertical" or style == "Horizontal" then
+        layout = Instance.new("UIListLayout")
+        layout.FillDirection = (style == "Vertical") and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0, 4)
+        layout.Parent = container
+    elseif style == "Grid" then
+        layout = Instance.new("UIGridLayout")
+        layout.CellSize = options.CellSize or UDim2.new(0, 100, 0, 30)
+        layout.CellPadding = options.CellPadding or UDim2.new(0, 5, 0, 5)
+        layout.FillDirectionMaxCells = options.Columns or 2
+        layout.Parent = container
+    end
+
+    -- Auto‑resize container for list/grid layouts
+    if layout and layout:IsA("UIListLayout") then
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            if style == "Vertical" then
+                container.Size = UDim2.new(container.Size.X.Scale, container.Size.X.Offset, 0, layout.AbsoluteContentSize.Y + 8)
+            else
+                container.Size = UDim2.new(0, layout.AbsoluteContentSize.X + 8, container.Size.Y.Scale, container.Size.Y.Offset)
+            end
+        end)
+    elseif layout and layout:IsA("UIGridLayout") then
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            container.Size = UDim2.new(container.Size.X.Scale, container.Size.X.Offset, 0, layout.AbsoluteContentSize.Y + 8)
+        end)
+    end
+
+    -- Dummy tab to forward all Add* methods to this container
+    local dummyTab = {
+        _page = container,
+        _window = self._window,
+        _layoutOrder = 0,
+    }
+    setmetatable(dummyTab, TabComponent)
+
+    local layoutObj = {}
+    setmetatable(layoutObj, {
+        __index = function(_, methodName)
+            local method = dummyTab[methodName]
+            if type(method) == "function" then
+                return function(_, ...)
+                    if style == "Absolute" then
+                        -- Intercept options to support manual positioning
+                        local args = {...}
+                        local opts = args[#args]
+                        if type(opts) == "table" then
+                            if opts.Position or opts.Size or opts.AnchorPoint then
+                                -- Create wrapper frame with these properties
+                                local wrapper = Instance.new("Frame")
+                                wrapper.BackgroundTransparency = 1
+                                wrapper.Position = opts.Position or UDim2.new(0, 0, 0, 0)
+                                wrapper.Size = opts.Size or UDim2.new(0, 100, 0, 24)
+                                wrapper.AnchorPoint = opts.AnchorPoint or Vector2.new(0, 0)
+                                wrapper.Parent = container
+
+                                -- Remove positioning keys from opts so they don't interfere
+                                opts.Position = nil
+                                opts.Size = nil
+                                opts.AnchorPoint = nil
+
+                                -- Temporarily set dummyTab page to wrapper
+                                local originalPage = dummyTab._page
+                                dummyTab._page = wrapper
+                                local comp = method(dummyTab, unpack(args))
+                                dummyTab._page = originalPage
+
+                                -- Make the component fill the wrapper
+                                local instance = comp:GetInstance()
+                                instance.AnchorPoint = Vector2.new(0, 0)
+                                instance.Position = UDim2.new(0, 0, 0, 0)
+                                instance.Size = UDim2.new(1, 0, 1, 0)
+
+                                return comp
+                            end
+                        end
+                    end
+                    -- Default behaviour (vertical/horizontal/grid)
+                    return method(dummyTab, ...)
+                end
+            end
+            return method
+        end
+    })
+
+    function layoutObj:SetStyle(newStyle, styleOptions)
+        style = newStyle
+        if layout then
+            layout:Destroy()
+            layout = nil
+        end
+        if style == "Vertical" or style == "Horizontal" then
+            layout = Instance.new("UIListLayout")
+            layout.FillDirection = (style == "Vertical") and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
+            layout.SortOrder = Enum.SortOrder.LayoutOrder
+            layout.Padding = UDim.new(0, 4)
+            layout.Parent = container
+        elseif style == "Grid" then
+            local gridOpts = styleOptions or {}
+            layout = Instance.new("UIGridLayout")
+            layout.CellSize = gridOpts.CellSize or UDim2.new(0, 100, 0, 30)
+            layout.CellPadding = gridOpts.CellPadding or UDim2.new(0, 5, 0, 5)
+            layout.FillDirectionMaxCells = gridOpts.Columns or 2
+            layout.Parent = container
+        end
+        -- Note: existing children need to be re-laid out; for simplicity, we assume they keep their LayoutOrder.
+    end
+
+    function layoutObj:Destroy()
+        container:Destroy()
+    end
+
+    return layoutObj
+end
+
+-- ── Tab:AddTextToggle(text, default, callback, options) ────────────────────
+function TabComponent:AddTextToggle(text, default, callback, options)
+    local theme = getTheme(self)
+    options = options or {}
+    local isOn = default or false
+
+    local onColor = options.OnColor or theme.TitleBg
+    local offColor = options.OffColor or theme.SubText
+
+    local lbl = Instance.new("TextButton")
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(1, 0, 0, 0)   -- height will auto‑size
+    lbl.LayoutOrder = self:_nextOrder()
+    lbl.Font = Enum.Font.RobotoMono
+    lbl.Text = text
+    lbl.TextColor3 = isOn and onColor or offColor
+    lbl.TextSize = options.TextSize or 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextWrapped = true
+    lbl.RichText = true
+    lbl.Parent = self._page
+
+    -- Auto‑size height
+    lbl:GetPropertyChangedSignal("TextBounds"):Connect(function()
+        lbl.Size = UDim2.new(1, 0, 0, lbl.TextBounds.Y + 2)
+    end)
+
+    lbl.MouseButton1Click:Connect(function()
+        isOn = not isOn
+        lbl.TextColor3 = isOn and onColor or offColor
+        if callback then callback(isOn) end
+    end)
+
+    -- QoL methods
+    local obj = {}
+    function obj:GetValue() return isOn end
+    function obj:SetValue(state)
+        isOn = state
+        lbl.TextColor3 = isOn and onColor or offColor
+        if callback then callback(isOn) end
+    end
+    function obj:Toggle() obj:SetValue(not isOn) end
+    function obj:SetText(t) lbl.Text = t end
+    function obj:GetText() return lbl.Text end
+    function obj:Destroy() lbl:Destroy() end
+    function obj:GetInstance() return lbl end
+
+    return obj
+end
+
 -- ── Window:SetTheme(newTheme) ──────────────────────────────────────────────
 function RGui:SetTheme(newTheme)
     local oldTheme = self._theme
