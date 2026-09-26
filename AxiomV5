@@ -16,7 +16,7 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2.4
+-- Axiom V5 Israeli.V2.5
 --DALSDIK
 
 local RGui = {}
@@ -3196,10 +3196,11 @@ function TabComponent:AddLayout(options)
         layout = Instance.new("UIListLayout")
         layout.FillDirection = Enum.FillDirection.Horizontal
         layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
         layout.Padding = UDim.new(0, padding)
         layout.Parent = container
 
-        -- ✅ Horizontal: keep the height fixed, no auto-grow
     elseif style == "Grid" then
         layout = Instance.new("UIGridLayout")
         layout.CellSize = options.CellSize or UDim2.new(0, 100, 0, 30)
