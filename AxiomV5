@@ -16,8 +16,8 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2.2
---Featy
+-- Axiom V5 Israeli.V2.3
+--DALSDIK
 
 local RGui = {}
 RGui.__index = RGui
