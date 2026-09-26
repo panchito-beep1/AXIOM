@@ -3234,7 +3234,53 @@ function TabComponent:AddLayout(options)
             return function(_, ...)
                 local args = { ... }
 
-                -- For Absolute style, intercept positioning options in the last table arg
+                ------------------------------------------------------------------
+                -- Horizontal: wrap in a sized frame so UIListLayout can arrange it
+                ------------------------------------------------------------------
+                if style == "Horizontal" then
+                    local opts = args[#args]
+                    if type(opts) ~= "table" then
+                        opts = {}
+                        args[#args + 1] = opts
+                    end
+
+                    -- Default size: 100px wide, full height of container
+                    local size     = opts.Size or UDim2.new(0, 100, 1, 0)
+                    local position = opts.Position
+                    local anchor   = opts.AnchorPoint
+
+                    -- Strip positioning so the child doesn't apply them itself
+                    opts.Size, opts.Position, opts.AnchorPoint = nil, nil, nil
+
+                    local wrapper = Instance.new("Frame")
+                    wrapper.BackgroundTransparency = 1
+                    wrapper.Size = size
+                    wrapper.Position = position or UDim2.new(0, 0, 0, 0)
+                    wrapper.AnchorPoint = anchor or Vector2.new(0, 0)
+                    wrapper.Parent = container
+                    -- Not part of the layout order? Set later after creation
+
+                    local originalPage = dummyTab._page
+                    dummyTab._page = wrapper
+                    local comp = method(dummyTab, table.unpack(args))
+                    dummyTab._page = originalPage
+
+                    -- Stretch the created component to fill the wrapper
+                    local inst = comp:GetInstance()
+                    inst.AnchorPoint = Vector2.new(0, 0)
+                    inst.Position = UDim2.new(0, 0, 0, 0)
+                    inst.Size = UDim2.new(1, 0, 1, 0)
+
+                    -- Assign LayoutOrder to the wrapper (used by UIListLayout)
+                    wrapper.LayoutOrder = dummyTab._layoutOrder
+                    dummyTab._layoutOrder = dummyTab._layoutOrder + 1
+
+                    return comp
+                end
+
+                ------------------------------------------------------------------
+                -- Absolute: existing behavior
+                ------------------------------------------------------------------
                 if style == "Absolute" then
                     local opts = args[#args]
                     if type(opts) == "table" and (opts.Position or opts.Size or opts.AnchorPoint) then
@@ -3245,16 +3291,13 @@ function TabComponent:AddLayout(options)
                         wrapper.AnchorPoint = opts.AnchorPoint or Vector2.new(0, 0)
                         wrapper.Parent = container
 
-                        -- Strip positioning so the component doesn't try to apply them
                         opts.Position, opts.Size, opts.AnchorPoint = nil, nil, nil
 
-                        -- Redirect creation into the wrapper
                         local originalPage = dummyTab._page
                         dummyTab._page = wrapper
                         local comp = method(dummyTab, table.unpack(args))
                         dummyTab._page = originalPage
 
-                        -- Stretch the component inside the wrapper
                         local inst = comp:GetInstance()
                         inst.AnchorPoint = Vector2.new(0, 0)
                         inst.Position = UDim2.new(0, 0, 0, 0)
@@ -3264,7 +3307,9 @@ function TabComponent:AddLayout(options)
                     end
                 end
 
-                -- Default: forward to the dummy tab (list/grid placement)
+                ------------------------------------------------------------------
+                -- Vertical / Grid: normal forwarding
+                ------------------------------------------------------------------
                 return method(dummyTab, table.unpack(args))
             end
         end
