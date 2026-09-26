@@ -3335,6 +3335,118 @@ function TabComponent:AddTextToggle(text, default, callback, options)
     return obj
 end
 
+-- ── Tab:AddProgressBar(text, default, callback, options) ───────────────────
+function TabComponent:AddProgressBar(text, default, callback, options)
+    local theme = getTheme(self)
+    options = options or {}
+    local min       = options.Min       or 0
+    local max       = options.Max       or 100
+    local decimals  = options.Decimals  or 2
+    local barHeight = options.Height    or 20
+    local fillColor = options.FillColor or theme.SliderFill
+    local bgColor   = options.BackgroundColor or theme.SliderTrack
+    local txtColor  = options.TextColor or theme.Text
+
+    local value = math.clamp(default or min, min, max)
+
+    local container = Instance.new("Frame")
+    container.BackgroundColor3 = bgColor
+    container.BorderSizePixel = 0
+    container.Size = UDim2.new(1, 0, 0, barHeight)
+    container.LayoutOrder = self:_nextOrder()
+    container.Parent = self._page
+    applyCorner(container, 2)
+    applyBorder(container, theme.Border)
+
+    -- Fill bar
+    local fill = Instance.new("Frame")
+    fill.BackgroundColor3 = fillColor
+    fill.BorderSizePixel = 0
+    fill.Size = UDim2.new((value - min) / (max - min), 0, 1, 0)
+    fill.Parent = container
+    applyCorner(fill, 2)
+
+    -- Label overlay (centered, always readable)
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(1, 0, 1, 0)
+    lbl.Font = Enum.Font.RobotoMono
+    lbl.TextColor3 = txtColor
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Center
+    lbl.TextYAlignment = Enum.TextYAlignment.Center
+    lbl.RichText = true
+    lbl.ZIndex = 2
+    lbl.Parent = container
+
+    local function formatText()
+        local pct = (value - min) / (max - min) * 100
+        local label = text and (text .. " ") or ""
+        return string.format("%s%.2f%%", label, pct)
+    end
+
+    local function refresh()
+        local rel = (value - min) / (max - min)
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        lbl.Text = formatText()
+    end
+    refresh()
+
+    -- Public wrapper object
+    local obj = {}
+
+    function obj:GetValue()
+        return value
+    end
+
+    function obj:SetValue(val)
+        val = math.clamp(val, min, max)
+        value = val
+        refresh()
+        if callback then callback(value) end
+    end
+
+    function obj:AddValue(delta)
+        obj:SetValue(value + delta)
+    end
+
+    function obj:SetPercent(pct)
+        obj:SetValue(min + (max - min) * (pct / 100))
+    end
+
+    function obj:GetPercent()
+        return (value - min) / (max - min) * 100
+    end
+
+    function obj:Reset()
+        obj:SetValue(min)
+    end
+
+    function obj:SetText(t)
+        text = t
+        refresh()
+    end
+
+    function obj:GetText()
+        return text
+    end
+
+    function obj:SetFillColor(color)
+        fillColor = color
+        fill.BackgroundColor3 = color
+    end
+
+    function obj:Destroy()
+        container:Destroy()
+    end
+
+    function obj:GetInstance()
+        return container
+    end
+
+    return obj
+end
+
 -- ── Window:SetTheme(newTheme) ──────────────────────────────────────────────
 function RGui:SetTheme(newTheme)
     local oldTheme = self._theme
