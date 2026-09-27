@@ -950,9 +950,6 @@ function TabComponent:AddCheckbox(text, default, callback, optOptions)
     return obj
 end
 
--- ════════════════════════════════════════════════════════════════════════════
---  AddSlider (with text input)
--- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
     local theme = getTheme(self)
     local options = optOptions or {}
@@ -994,7 +991,7 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
         end
     end
 
-    local lbl = Instance.new("TextButton")
+    local lbl = Instance.new("TextLabel")
     lbl.BackgroundTransparency = 1
     lbl.Size = UDim2.new(1, 0, 1, 0)
     lbl.Font = Enum.Font.RobotoMono
@@ -1002,63 +999,10 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
     lbl.TextColor3 = theme.Text
     lbl.TextSize = 13
     lbl.ZIndex = 2
-    lbl.AutoButtonColor = false
     lbl.Parent = track
 
-    local inputBox = Instance.new("TextBox")
-    inputBox.BackgroundColor3 = theme.FrameBg
-    inputBox.BorderSizePixel = 0
-    inputBox.Size = UDim2.new(1, -6, 1, 0)
-    inputBox.Position = UDim2.new(0, 3, 0, 0)
-    inputBox.Font = Enum.Font.RobotoMono
-    inputBox.TextColor3 = theme.Text
-    inputBox.TextSize = 13
-    inputBox.ZIndex = 3
-    inputBox.Visible = false
-    inputBox.ClearTextOnFocus = false
-    inputBox.Parent = track
-    applyCorner(inputBox, 2)
-    applyBorder(inputBox, theme.Accent)
-
-    local function enterTypingMode()
-        if not currentEnabled then return end
-        if isFloat then
-            inputBox.Text = string.format("%." .. decimals .. "f", value)
-        else
-            inputBox.Text = tostring(math.floor(value + 0.5))
-        end
-        inputBox.Visible = true
-        lbl.Visible = false
-        inputBox:CaptureFocus()
-        inputBox.CursorPosition = -1
-    end
-
-    local function commitValue()
-        if not inputBox.Visible then return end
-        local n = tonumber(inputBox.Text)
-        if n then
-            n = math.clamp(n, min, max)
-            if not isFloat then
-                n = math.floor(n + 0.5)
-            else
-                n = math.floor(n * (10 ^ decimals) + 0.5) / (10 ^ decimals)
-            end
-            value = n
-            local rel = (value - min) / (max - min)
-            fill.Size = UDim2.new(rel, 0, 1, 0)
-            lbl.Text = formatValue(value)
-            safeCall(currentCallback, value)
-        end
-        inputBox.Visible = false
-        lbl.Visible = true
-    end
-
-    lbl.MouseButton1Click:Connect(enterTypingMode)
-    inputBox.FocusLost:Connect(commitValue)
-
     track.MouseEnter:Connect(function()
-        if not currentEnabled then return end
-        if not inputBox.Visible then track.BackgroundColor3 = theme.FrameBgHover end
+        if currentEnabled then track.BackgroundColor3 = theme.FrameBgHover end
     end)
     track.MouseLeave:Connect(function()
         track.BackgroundColor3 = options.Color or theme.SliderTrack
@@ -1066,7 +1010,6 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
 
     local function updateFromInput(input)
         if not currentEnabled then return end
-        if inputBox.Visible then return end
         local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
         value = min + (max - min) * rel
         if not isFloat then
@@ -1083,7 +1026,6 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
     track.InputBegan:Connect(function(i)
         if not currentEnabled then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            if inputBox.Visible then return end
             dragging = true
             updateFromInput(i)
         end
@@ -4028,6 +3970,191 @@ function RGui:ShowLoadingScreen(title)
         end
     end
     return controller
+end
+
+-- ── Tab:AddNumberInput(text, min, max, default, callback, options) ──────────
+-- A number field with -/+ buttons and a text box for precise entry.
+-- options.Step: increment per click (default 1, use 0.1 for decimals)
+-- options.Float / options.Decimals: for decimal values
+-- options.Width: text box width (default 60)
+function TabComponent:AddNumberInput(text, min, max, default, callback, options)
+    local theme = getTheme(self)
+    options = options or {}
+    min, max = min or 0, max or 100
+    local isFloat = options.Float or false
+    local decimals = options.Decimals or 1
+    local step = options.Step or (isFloat and (10 ^ -decimals) or 1)
+    local inputWidth = options.Width or 70
+    local currentCallback = callback
+    local currentEnabled = true
+
+    local value = math.clamp(default or min, min, max)
+
+    local function clampValue(v)
+        v = math.clamp(v, min, max)
+        if isFloat then
+            v = math.floor(v * (10 ^ decimals) + 0.5) / (10 ^ decimals)
+        else
+            v = math.floor(v + 0.5)
+        end
+        return v
+    end
+    value = clampValue(value)
+
+    local container = Instance.new("Frame")
+    container.BackgroundTransparency = 1
+    container.Size = UDim2.new(1, 0, 0, 24)
+    container.LayoutOrder = self:_nextOrder()
+    container.Parent = self._page
+
+    -- Label
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Position = UDim2.new(0, 4, 0, 0)
+    label.Size = UDim2.new(1, -inputWidth - 60, 1, 0)
+    label.Font = Enum.Font.RobotoMono
+    label.Text = text
+    label.TextColor3 = theme.Text
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = container
+
+    -- Minus button
+    local minusBtn = Instance.new("TextButton")
+    minusBtn.BackgroundColor3 = options.Color or theme.FrameBg
+    minusBtn.Position = UDim2.new(1, -(inputWidth + 52), 0, 0)
+    minusBtn.Size = UDim2.new(0, 24, 1, 0)
+    minusBtn.Font = Enum.Font.RobotoMono
+    minusBtn.Text = "-"
+    minusBtn.TextColor3 = theme.Text
+    minusBtn.TextSize = 14
+    minusBtn.Parent = container
+    applyCorner(minusBtn, 2)
+    applyBorder(minusBtn, theme.Border)
+
+    -- Text box
+    local box = Instance.new("TextBox")
+    box.BackgroundColor3 = options.Color or theme.FrameBg
+    box.Position = UDim2.new(1, -(inputWidth + 24), 0, 0)
+    box.Size = UDim2.new(0, inputWidth, 1, 0)
+    box.Font = Enum.Font.RobotoMono
+    box.Text = isFloat and string.format("%." .. decimals .. "f", value) or tostring(value)
+    box.TextColor3 = theme.Text
+    box.TextSize = 13
+    box.TextXAlignment = Enum.TextXAlignment.Center
+    box.ClearTextOnFocus = false
+    box.Parent = container
+    applyCorner(box, 2)
+    applyBorder(box, theme.Border)
+
+    -- Plus button
+    local plusBtn = Instance.new("TextButton")
+    plusBtn.BackgroundColor3 = options.Color or theme.FrameBg
+    plusBtn.Position = UDim2.new(1, -24, 0, 0)
+    plusBtn.Size = UDim2.new(0, 24, 1, 0)
+    plusBtn.Font = Enum.Font.RobotoMono
+    plusBtn.Text = "+"
+    plusBtn.TextColor3 = theme.Text
+    plusBtn.TextSize = 14
+    plusBtn.Parent = container
+    applyCorner(plusBtn, 2)
+    applyBorder(plusBtn, theme.Border)
+
+    ----------------------------------------------------------------
+    -- Helpers
+    ----------------------------------------------------------------
+    local function refreshText()
+        if isFloat then
+            box.Text = string.format("%." .. decimals .. "f", value)
+        else
+            box.Text = tostring(value)
+        end
+    end
+
+    local function setValue(newVal, fire)
+        local clamped = clampValue(newVal)
+        if clamped == value then refreshText(); return end
+        value = clamped
+        refreshText()
+        if fire ~= false then safeCall(currentCallback, value) end
+    end
+
+    ----------------------------------------------------------------
+    -- Minus / Plus click
+    ----------------------------------------------------------------
+    minusBtn.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
+        setValue(value - step)
+    end)
+    plusBtn.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
+        setValue(value + step)
+    end)
+
+    -- Hover effects
+    local function addHover(btn)
+        btn.MouseEnter:Connect(function()
+            if currentEnabled then btn.BackgroundColor3 = options.Color or theme.FrameBgHover end
+        end)
+        btn.MouseLeave:Connect(function()
+            btn.BackgroundColor3 = options.Color or theme.FrameBg
+        end)
+    end
+    addHover(minusBtn)
+    addHover(plusBtn)
+
+    ----------------------------------------------------------------
+    -- Text box input
+    ----------------------------------------------------------------
+    box.FocusLost:Connect(function()
+        if not currentEnabled then return end
+        local n = tonumber(box.Text)
+        if n then
+            setValue(n)
+        else
+            refreshText()   -- invalid input, restore previous value
+        end
+    end)
+
+    ----------------------------------------------------------------
+    -- Optional mouse wheel support
+    ----------------------------------------------------------------
+    box.InputChanged:Connect(function(input)
+        if not currentEnabled then return end
+        if input.UserInputType == Enum.UserInputType.MouseWheel then
+            setValue(value + step * input.Position.Z)
+        end
+    end)
+
+    ----------------------------------------------------------------
+    -- Public API
+    ----------------------------------------------------------------
+    if options.Tooltip then attachTooltip(box, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
+
+    local obj = {}
+    function obj:GetValue() return value end
+    function obj:SetValue(v) setValue(v) end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        minusBtn.Active = state
+        plusBtn.Active = state
+        box.Active = state
+        local base = state and (options.Color or theme.FrameBg) or disabledColor(options.Color or theme.FrameBg)
+        minusBtn.BackgroundColor3 = base
+        plusBtn.BackgroundColor3 = base
+        box.BackgroundColor3 = base
+        box.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function obj:IsEnabled() return currentEnabled end
+    function obj:Destroy() container:Destroy() end
+    function obj:GetInstance() return container end
+
+    local key = options.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return value end, function(v) obj:SetValue(v) end)
+
+    return obj
 end
 
 -- ════════════════════════════════════════════════════════════════════════════
