@@ -1,7 +1,7 @@
 --[[
   :::.      .,::      .::::    ...     .        :
   ;;`;;     `;;;,  .,;; ;;; .;;;;;;;.  ;;,.    ;;;
- ,[[ '[[,     '[[,,[['  [[[,[[     \[[,[[[[, ,[[[[,
+ ,[[ '[[,     '[[,,[['  [[[,[[     \[[,[[,[[[[, ,[[[[,
 c$$$cc$$$c     Y$$$P    $$$$$$,     $$$$$$$$$$$"$$$
  888   888,  oP"``"Yo,  888"888,_ _,88P888 Y88" 888o
  YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
@@ -16,9 +16,9 @@ print([[
    YMM   ""`,m"       "Mm,MMM  "YMMMMMP" MMM  M'  "MMM
 ]])
 
--- Axiom V5 Israeli.V2.11 – Complete with File‑Based Config & Safe Clipboard
--- All components return control objects with get/set/clear/add methods.
--- Added Images BACK
+-- Axiom V5 Israeli.V3.0 -- FULL FEATURE EDITION
+-- Includes: SetCallback everywhere, tooltips, sub-tabs, global search,
+-- save/load state, safe callbacks, slider text input, combo keybinds, enable/disable
 
 local RGui = {}
 RGui.__index = RGui
@@ -119,6 +119,76 @@ local function makeDraggable(frame, handle)
     end)
 end
 
+-- ── [NEW #6] Safe callback invoker ────────────────────────────────────────────
+local function safeCall(fn, ...)
+    if not fn then return end
+    local ok, err = pcall(fn, ...)
+    if not ok then
+        warn("[RGui] Callback error: " .. tostring(err))
+    end
+end
+
+-- ── [NEW #10] Disabled colour helper ──────────────────────────────────────────
+local function disabledColor(c)
+    if typeof(c) ~= "Color3" then return c end
+    return Color3.new(c.R * 0.4, c.G * 0.4, c.B * 0.4)
+end
+
+-- ── [NEW #2] Tooltip infrastructure ───────────────────────────────────────────
+local tooltipGui, tooltipLabel, tooltipTimer
+
+local function ensureTooltipGui(theme)
+    if tooltipGui then
+        tooltipLabel.BackgroundColor3 = theme.WindowBg
+        tooltipLabel.TextColor3 = theme.Text
+        local stroke = tooltipLabel:FindFirstChildOfClass("UIStroke")
+        if stroke then stroke.Color = theme.Border end
+        return
+    end
+    tooltipGui = Instance.new("ScreenGui")
+    tooltipGui.Name = "RGui_Tooltip"
+    tooltipGui.ResetOnSpawn = false
+    tooltipGui.DisplayOrder = 999
+    tooltipGui.Parent = CoreGui
+
+    tooltipLabel = Instance.new("TextLabel")
+    tooltipLabel.BackgroundColor3 = theme.WindowBg
+    tooltipLabel.BorderSizePixel = 0
+    tooltipLabel.Font = Enum.Font.RobotoMono
+    tooltipLabel.TextColor3 = theme.Text
+    tooltipLabel.TextSize = 12
+    tooltipLabel.TextWrapped = true
+    tooltipLabel.AutomaticSize = Enum.AutomaticSize.XY
+    tooltipLabel.Visible = false
+    tooltipLabel.ZIndex = 1000
+    tooltipLabel.Parent = tooltipGui
+    applyCorner(tooltipLabel, 2)
+    applyBorder(tooltipLabel, theme.Border)
+    applyPadding(tooltipLabel, 6)
+end
+
+local function hideTooltip()
+    if tooltipTimer then task.cancel(tooltipTimer); tooltipTimer = nil end
+    if tooltipLabel then tooltipLabel.Visible = false end
+end
+
+local function attachTooltip(anchor, text, win)
+    if not text or not anchor then return end
+    anchor.MouseEnter:Connect(function()
+        hideTooltip()
+        tooltipTimer = task.delay(0.4, function()
+            local theme = (win and win._theme) or RGui.DefaultTheme
+            ensureTooltipGui(theme)
+            tooltipLabel.Text = text
+            local absPos  = anchor.AbsolutePosition
+            local absSize = anchor.AbsoluteSize
+            tooltipLabel.Position = UDim2.new(0, absPos.X + 8, 0, absPos.Y + absSize.Y + 4)
+            tooltipLabel.Visible = true
+        end)
+    end)
+    anchor.MouseLeave:Connect(hideTooltip)
+end
+
 -- ── Risky colour warning helper ──────────────────────────────────────────────
 local function warnCustomColor(tab, componentName)
     if tab._window then
@@ -128,7 +198,9 @@ local function warnCustomColor(tab, componentName)
     end
 end
 
--- ── RGui.new(title, customTheme, options) ────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  RGui.new
+-- ════════════════════════════════════════════════════════════════════════════
 function RGui.new(title, customTheme, options)
     local self = setmetatable({}, RGui)
     title = title or "R-GUI"
@@ -172,7 +244,6 @@ function RGui.new(title, customTheme, options)
     titleLbl.Parent = titleBar
     titleLbl.RichText = true
 
-    -- Icon support for window
     if options.Icon then
         local icon = Instance.new("ImageLabel")
         icon.BackgroundTransparency = 1
@@ -225,6 +296,7 @@ function RGui.new(title, customTheme, options)
         collapseBtn.Text = isCollapsed and "+" or "-"
     end)
     closeBtn.MouseButton1Click:Connect(function()
+        if self._stateFilePath then self:SaveState() end
         screen:Destroy()
     end)
 
@@ -286,11 +358,162 @@ function RGui.new(title, customTheme, options)
     self._tabs = {}
     self._watermark = nil
     self._notificationGui = nil
+    self._titleLbl = titleLbl
+    self._activeTabIndex = 1
+    -- [NEW #4] search
+    self._searchRegistry = {}
+    self._searchQuery = ""
+    self._searchBox = nil
+    -- [NEW #5] state
+    self._stateRegistry = {}
+    self._stateAutoCounter = 0
+    self._stateFilePath = nil
 
     return self
 end
 
--- ── Window:AddTab(name, iconOrOptions) ────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  [NEW #4] Global search
+-- ════════════════════════════════════════════════════════════════════════════
+function RGui:_registerSearch(frame, text)
+    if not frame or not text then return end
+    table.insert(self._searchRegistry, { Frame = frame, Text = tostring(text):lower() })
+end
+
+function RGui:_applySearch(query)
+    self._searchQuery = (query or ""):lower()
+    local q = self._searchQuery
+    for _, entry in ipairs(self._searchRegistry) do
+        if entry.Frame and entry.Frame.Parent then
+            if q == "" then
+                entry.Frame.Visible = true
+            else
+                entry.Frame.Visible = entry.Text:find(q, 1, true) ~= nil
+            end
+        end
+    end
+end
+
+function RGui:EnableSearch(options)
+    options = options or {}
+    if self._searchBox then return self._searchBox end
+    local theme = self._theme
+    local titleBar = self._mainFrame:FindFirstChild("TitleBar")
+    if not titleBar then return end
+    local width = options.Width or 120
+
+    local searchBox = Instance.new("TextBox")
+    searchBox.Name               = "GlobalSearch"
+    searchBox.BackgroundColor3   = theme.FrameBg
+    searchBox.BorderSizePixel    = 0
+    searchBox.Size               = UDim2.new(0, width, 0, 18)
+    searchBox.Position           = UDim2.new(1, -(44 + 4 + width), 0.5, -9)
+    searchBox.Font               = Enum.Font.RobotoMono
+    searchBox.PlaceholderText    = "Search..."
+    searchBox.PlaceholderColor3  = theme.SubText
+    searchBox.Text               = ""
+    searchBox.TextColor3         = theme.Text
+    searchBox.TextSize           = 12
+    searchBox.TextXAlignment     = Enum.TextXAlignment.Left
+    searchBox.ClearTextOnFocus   = false
+    searchBox.Parent             = titleBar
+    applyCorner(searchBox, 2)
+    applyBorder(searchBox, theme.Border)
+
+    if self._titleLbl then
+        local reserve = width + 4 + 44 + 8
+        self._titleLbl.Size = UDim2.new(1, -reserve, 1, 0)
+    end
+
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        self:_applySearch(searchBox.Text)
+    end)
+
+    self._searchBox = searchBox
+    return searchBox
+end
+
+function RGui:DisableSearch()
+    if self._searchBox then
+        self._searchBox:Destroy()
+        self._searchBox = nil
+    end
+    self:_applySearch("")
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  [NEW #5] Save / load state
+-- ════════════════════════════════════════════════════════════════════════════
+function RGui:_registerState(key, getFn, setFn)
+    if not key then return end
+    self._stateRegistry[key] = { get = getFn, set = setFn }
+end
+
+function RGui:_autoStateKey(tabLabel, componentLabel)
+    self._stateAutoCounter = self._stateAutoCounter + 1
+    return string.format("%s::%s::%d", tostring(tabLabel), tostring(componentLabel), self._stateAutoCounter)
+end
+
+function RGui:EnableStateSaving(folder, filename)
+    folder   = folder   or "RGui"
+    filename = filename or "state.json"
+    if isfolder and not isfolder(folder) then makefolder(folder) end
+    self._stateFilePath = folder .. "/" .. filename
+end
+
+function RGui:SaveState()
+    if not self._stateFilePath then
+        warn("[RGui] SaveState: call win:EnableStateSaving() first")
+        return
+    end
+    local snapshot = {
+        Position = {
+            self._mainFrame.Position.X.Scale, self._mainFrame.Position.X.Offset,
+            self._mainFrame.Position.Y.Scale, self._mainFrame.Position.Y.Offset,
+        },
+        Size = {
+            self._mainFrame.Size.X.Scale, self._mainFrame.Size.X.Offset,
+            self._mainFrame.Size.Y.Scale, self._mainFrame.Size.Y.Offset,
+        },
+        ActiveTab  = self._activeTabIndex,
+        Components = {},
+    }
+    for key, entry in pairs(self._stateRegistry) do
+        local ok, value = pcall(entry.get)
+        if ok then snapshot.Components[key] = value end
+    end
+    local json = HttpService:JSONEncode(snapshot)
+    writefile(self._stateFilePath, json)
+end
+
+function RGui:LoadState()
+    if not self._stateFilePath then
+        warn("[RGui] LoadState: call win:EnableStateSaving() first")
+        return
+    end
+    if not isfile(self._stateFilePath) then return end
+
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(self._stateFilePath))
+    end)
+    if not ok or type(data) ~= "table" then return end
+
+    if data.Position then self._mainFrame.Position = UDim2.new(unpack(data.Position)) end
+    if data.Size     then self._mainFrame.Size     = UDim2.new(unpack(data.Size))     end
+
+    for key, value in pairs(data.Components or {}) do
+        local entry = self._stateRegistry[key]
+        if entry then pcall(entry.set, value) end
+    end
+
+    if data.ActiveTab and self._tabs[data.ActiveTab] then
+        self._tabs[data.ActiveTab].Button.MouseButton1Click:Fire()
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  RGui:AddTab
+-- ════════════════════════════════════════════════════════════════════════════
 function RGui:AddTab(name, iconOrOptions)
     local theme = self._theme
     local options = {}
@@ -361,10 +584,11 @@ function RGui:AddTab(name, iconOrOptions)
     table.insert(self._tabs, {Button = tabBtn, Page = page, TextLabel = tabText})
 
     tabBtn.MouseButton1Click:Connect(function()
-        for _, t in ipairs(self._tabs) do
+        for i, t in ipairs(self._tabs) do
             t.Page.Visible = false
             t.Button.BackgroundColor3 = theme.TabNormal
             t.TextLabel.TextColor3 = theme.TabNormalText
+            if t.Button == tabBtn then self._activeTabIndex = i end
         end
         page.Visible = true
         tabBtn.BackgroundColor3 = theme.TabActive
@@ -375,6 +599,7 @@ function RGui:AddTab(name, iconOrOptions)
         page.Visible = true
         tabBtn.BackgroundColor3 = theme.TabActive
         tabText.TextColor3 = theme.TabActiveText
+        self._activeTabIndex = 1
     end
 
     local tabObj = setmetatable({}, TabComponent)
@@ -394,21 +619,151 @@ local function getTheme(tab)
     return tab._window._theme
 end
 
--- ── Tab:AddButton(text, callback, iconOrOptions) ─────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  [NEW #3] AddSubTab
+-- ════════════════════════════════════════════════════════════════════════════
+function TabComponent:AddSubTab(name, iconOrOptions)
+    local theme = getTheme(self)
+    local options = {}
+    if type(iconOrOptions) == "string" then options = {Icon = iconOrOptions}
+    elseif type(iconOrOptions) == "table" then options = iconOrOptions end
+
+    if not self._subTabContainer then
+        local container = Instance.new("Frame")
+        container.BackgroundTransparency = 1
+        container.Size = UDim2.new(1, 0, 0, 26)
+        container.LayoutOrder = self:_nextOrder()
+        container.Parent = self._page
+        self._subTabContainer = container
+
+        local bar = Instance.new("Frame")
+        bar.BackgroundColor3 = theme.TabBarBg
+        bar.Size = UDim2.new(1, 0, 0, 24)
+        bar.Parent = container
+        applyBorder(bar, theme.Border)
+
+        local barLayout = Instance.new("UIListLayout")
+        barLayout.FillDirection = Enum.FillDirection.Horizontal
+        barLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        barLayout.Parent = bar
+
+        self._subTabBar       = bar
+        self._subTabBarLayout = barLayout
+        self._subTabs         = {}
+    end
+
+    local container = self._subTabContainer
+    local bar       = self._subTabBar
+
+    local subBtn = Instance.new("TextButton")
+    subBtn.BackgroundColor3 = theme.TabNormal
+    subBtn.Size = UDim2.new(0, 0, 1, 0)
+    subBtn.Font = Enum.Font.RobotoMono
+    subBtn.Text = ""
+    subBtn.TextSize = 12
+    subBtn.LayoutOrder = #self._subTabs + 1
+    subBtn.Parent = bar
+    applyBorder(subBtn, theme.Border)
+
+    local subText = Instance.new("TextLabel")
+    subText.BackgroundTransparency = 1
+    subText.Font = Enum.Font.RobotoMono
+    subText.Text = name
+    subText.TextColor3 = theme.TabNormalText
+    subText.TextSize = 12
+    subText.Parent = subBtn
+
+    local subIcon
+    if options.Icon then
+        subIcon = Instance.new("ImageLabel")
+        subIcon.BackgroundTransparency = 1
+        subIcon.Size = UDim2.new(0, 16, 0, 16)
+        subIcon.Position = UDim2.new(0, 4, 0.5, -8)
+        subIcon.Image = options.Icon
+        subIcon.Parent = subBtn
+    end
+
+    local txtSize = TextService:GetTextSize(name, 12, Enum.Font.RobotoMono, Vector2.new(999, 24))
+    local totalWidth = txtSize.X + 16 + (subIcon and 22 or 0)
+    subBtn.Size = UDim2.new(0, totalWidth, 1, 0)
+
+    if subIcon then
+        subText.Position = UDim2.new(0, 24, 0, 0)
+        subText.Size = UDim2.new(1, -24, 1, 0)
+    else
+        subText.Position = UDim2.new(0, 8, 0, 0)
+        subText.Size = UDim2.new(1, -16, 1, 0)
+    end
+
+    local page = Instance.new("Frame")
+    page.BackgroundTransparency = 1
+    page.Position = UDim2.new(0, 0, 0, 26)
+    page.Size = UDim2.new(1, 0, 0, 0)
+    page.Visible = false
+    page.Parent = container
+    applyPadding(page, 6)
+
+    local pageLayout = Instance.new("UIListLayout")
+    pageLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    pageLayout.Padding = UDim.new(0, 6)
+    pageLayout.Parent = page
+
+    local function updateSizes()
+        local h = pageLayout.AbsoluteContentSize.Y + 12
+        page.Size = UDim2.new(1, 0, 0, h)
+        if page.Visible then
+            container.Size = UDim2.new(1, 0, 0, 26 + h)
+        end
+    end
+    pageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateSizes)
+
+    table.insert(self._subTabs, {
+        Button = subBtn, Page = page, TextLabel = subText, UpdateSize = updateSizes,
+    })
+
+    subBtn.MouseButton1Click:Connect(function()
+        for _, t in ipairs(self._subTabs) do
+            t.Page.Visible = false
+            t.Button.BackgroundColor3 = theme.TabNormal
+            t.TextLabel.TextColor3 = theme.TabNormalText
+        end
+        page.Visible = true
+        subBtn.BackgroundColor3 = theme.TabActive
+        subText.TextColor3 = theme.TabActiveText
+        updateSizes()
+    end)
+
+    if #self._subTabs == 1 then
+        page.Visible = true
+        subBtn.BackgroundColor3 = theme.TabActive
+        subText.TextColor3 = theme.TabActiveText
+        task.defer(updateSizes)
+    end
+
+    local subTabObj = setmetatable({}, TabComponent)
+    subTabObj._page = page
+    subTabObj._layoutOrder = 0
+    subTabObj._window = self._window
+    return subTabObj
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddButton
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddButton(text, callback, iconOrOptions)
     local theme = getTheme(self)
     local options = {}
-    if type(iconOrOptions) == "string" then
-        options = {Icon = iconOrOptions}
-    elseif type(iconOrOptions) == "table" then
-        options = iconOrOptions
-    end
+    if type(iconOrOptions) == "string" then options = {Icon = iconOrOptions}
+    elseif type(iconOrOptions) == "table" then options = iconOrOptions end
 
     local bgColor = theme.FrameBg
     if options.Color then
         warnCustomColor(self, "Button")
         bgColor = options.Color
     end
+
+    local currentCallback = callback
+    local currentEnabled = true
 
     local btn = Instance.new("TextButton")
     btn.BackgroundColor3 = bgColor
@@ -443,23 +798,27 @@ function TabComponent:AddButton(text, callback, iconOrOptions)
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.Parent = btn
 
-    btn.MouseEnter:Connect(function() btn.BackgroundColor3 = options.Color or theme.FrameBgHover end)
+    btn.MouseEnter:Connect(function()
+        if currentEnabled then btn.BackgroundColor3 = options.Color or theme.FrameBgHover end
+    end)
     btn.MouseLeave:Connect(function() btn.BackgroundColor3 = bgColor end)
 
-    if callback then
-        btn.MouseButton1Click:Connect(function()
-            TweenService:Create(btn, TWEEN_FAST, {BackgroundColor3 = theme.Accent}):Play()
-            task.delay(0.1, function()
-                TweenService:Create(btn, TWEEN_FAST, {BackgroundColor3 = options.Color or theme.FrameBgHover}):Play()
-            end)
-            callback()
+    btn.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
+        TweenService:Create(btn, TWEEN_FAST, {BackgroundColor3 = theme.Accent}):Play()
+        task.delay(0.1, function()
+            TweenService:Create(btn, TWEEN_FAST, {BackgroundColor3 = options.Color or theme.FrameBgHover}):Play()
         end)
-    end
+        safeCall(currentCallback)
+    end)
+
+    if options.Tooltip then attachTooltip(btn, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(btn, text) end
 
     local obj = {}
     function obj:SetText(t) lbl.Text = t end
     function obj:GetText() return lbl.Text end
-    function obj:SetCallback(cb) callback = cb end
+    function obj:SetCallback(cb) currentCallback = cb end
     function obj:SetIcon(id)
         if not icon then
             icon = Instance.new("ImageLabel")
@@ -472,16 +831,32 @@ function TabComponent:AddButton(text, callback, iconOrOptions)
         end
         icon.Image = id
     end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        btn.Active = state
+        if state then
+            btn.BackgroundColor3 = options.Color or theme.FrameBg
+            lbl.TextColor3 = theme.Text
+        else
+            btn.BackgroundColor3 = disabledColor(options.Color or theme.FrameBg)
+            lbl.TextColor3 = disabledColor(theme.Text)
+        end
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() btn:Destroy() end
     function obj:GetInstance() return btn end
     return obj
 end
 
--- ── Tab:AddCheckbox(text, default, callback, optOptions) ─────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddCheckbox
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddCheckbox(text, default, callback, optOptions)
     local theme = getTheme(self)
     local options = optOptions or {}
     local checked = default or false
+    local currentCallback = callback
+    local currentEnabled = true
 
     local bgColor = theme.FrameBg
     if options.Color then
@@ -498,7 +873,9 @@ function TabComponent:AddCheckbox(text, default, callback, optOptions)
     applyCorner(row, 2)
     applyBorder(row, theme.Border)
 
-    row.MouseEnter:Connect(function() row.BackgroundColor3 = options.Color or theme.FrameBgHover end)
+    row.MouseEnter:Connect(function()
+        if currentEnabled then row.BackgroundColor3 = options.Color or theme.FrameBgHover end
+    end)
     row.MouseLeave:Connect(function() row.BackgroundColor3 = bgColor end)
 
     local check = Instance.new("TextLabel")
@@ -525,13 +902,17 @@ function TabComponent:AddCheckbox(text, default, callback, optOptions)
     lbl.Parent = row
 
     row.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         checked = not checked
         check.Text = checked and "✓" or ""
         TweenService:Create(check, TWEEN_FAST, {
             BackgroundColor3 = checked and theme.CheckOn or theme.CheckOff
         }):Play()
-        if callback then callback(checked) end
+        safeCall(currentCallback, checked)
     end)
+
+    if options.Tooltip then attachTooltip(row, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(row, text) end
 
     local obj = {}
     function obj:GetValue() return checked end
@@ -539,18 +920,39 @@ function TabComponent:AddCheckbox(text, default, callback, optOptions)
         checked = state
         check.Text = checked and "✓" or ""
         check.BackgroundColor3 = checked and theme.CheckOn or theme.CheckOff
-        if callback then callback(checked) end
+        safeCall(currentCallback, checked)
     end
     function obj:Toggle() obj:SetValue(not checked) end
     function obj:SetText(t) lbl.Text = t end
     function obj:GetText() return lbl.Text end
-    function obj:SetCallback(cb) callback = cb end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        row.Active = state
+        if state then
+            row.BackgroundColor3 = options.Color or theme.FrameBg
+            lbl.TextColor3 = theme.Text
+            check.BackgroundColor3 = checked and theme.CheckOn or theme.CheckOff
+        else
+            row.BackgroundColor3 = disabledColor(options.Color or theme.FrameBg)
+            lbl.TextColor3 = disabledColor(theme.Text)
+            check.BackgroundColor3 = disabledColor(checked and theme.CheckOn or theme.CheckOff)
+        end
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() row:Destroy() end
     function obj:GetInstance() return row end
+
+    -- [NEW #5] state register
+    local key = options.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return checked end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddSlider(text, min, max, default, callback, optOptions) ─────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddSlider (with text input)
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
     local theme = getTheme(self)
     local options = optOptions or {}
@@ -560,6 +962,8 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
     max = max or 100
     default = math.clamp(default or min, min, max)
     local value = default
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -582,24 +986,87 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
     fill.Parent = track
     applyCorner(fill, 2)
 
-    local lbl = Instance.new("TextLabel")
+    local function formatValue(v)
+        if isFloat then
+            return string.format("%s: %." .. decimals .. "f", text, v)
+        else
+            return string.format("%s: %d", text, math.floor(v + 0.5))
+        end
+    end
+
+    local lbl = Instance.new("TextButton")
     lbl.BackgroundTransparency = 1
     lbl.Size = UDim2.new(1, 0, 1, 0)
     lbl.Font = Enum.Font.RobotoMono
-    if isFloat then
-        lbl.Text = string.format("%s: %." .. decimals .. "f", text, value)
-    else
-        lbl.Text = string.format("%s: %d", text, value)
-    end
+    lbl.Text = formatValue(value)
     lbl.TextColor3 = theme.Text
     lbl.TextSize = 13
     lbl.ZIndex = 2
+    lbl.AutoButtonColor = false
     lbl.Parent = track
 
-    track.MouseEnter:Connect(function() track.BackgroundColor3 = theme.FrameBgHover end)
-    track.MouseLeave:Connect(function() track.BackgroundColor3 = options.Color or theme.SliderTrack end)
+    local inputBox = Instance.new("TextBox")
+    inputBox.BackgroundColor3 = theme.FrameBg
+    inputBox.BorderSizePixel = 0
+    inputBox.Size = UDim2.new(1, -6, 1, 0)
+    inputBox.Position = UDim2.new(0, 3, 0, 0)
+    inputBox.Font = Enum.Font.RobotoMono
+    inputBox.TextColor3 = theme.Text
+    inputBox.TextSize = 13
+    inputBox.ZIndex = 3
+    inputBox.Visible = false
+    inputBox.ClearTextOnFocus = false
+    inputBox.Parent = track
+    applyCorner(inputBox, 2)
+    applyBorder(inputBox, theme.Accent)
+
+    local function enterTypingMode()
+        if not currentEnabled then return end
+        if isFloat then
+            inputBox.Text = string.format("%." .. decimals .. "f", value)
+        else
+            inputBox.Text = tostring(math.floor(value + 0.5))
+        end
+        inputBox.Visible = true
+        lbl.Visible = false
+        inputBox:CaptureFocus()
+        inputBox.CursorPosition = -1
+    end
+
+    local function commitValue()
+        if not inputBox.Visible then return end
+        local n = tonumber(inputBox.Text)
+        if n then
+            n = math.clamp(n, min, max)
+            if not isFloat then
+                n = math.floor(n + 0.5)
+            else
+                n = math.floor(n * (10 ^ decimals) + 0.5) / (10 ^ decimals)
+            end
+            value = n
+            local rel = (value - min) / (max - min)
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            lbl.Text = formatValue(value)
+            safeCall(currentCallback, value)
+        end
+        inputBox.Visible = false
+        lbl.Visible = true
+    end
+
+    lbl.MouseButton1Click:Connect(enterTypingMode)
+    inputBox.FocusLost:Connect(commitValue)
+
+    track.MouseEnter:Connect(function()
+        if not currentEnabled then return end
+        if not inputBox.Visible then track.BackgroundColor3 = theme.FrameBgHover end
+    end)
+    track.MouseLeave:Connect(function()
+        track.BackgroundColor3 = options.Color or theme.SliderTrack
+    end)
 
     local function updateFromInput(input)
+        if not currentEnabled then return end
+        if inputBox.Visible then return end
         local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
         value = min + (max - min) * rel
         if not isFloat then
@@ -608,17 +1075,15 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
             value = math.floor(value * (10 ^ decimals) + 0.5) / (10 ^ decimals)
         end
         fill.Size = UDim2.new(rel, 0, 1, 0)
-        if isFloat then
-            lbl.Text = string.format("%s: %." .. decimals .. "f", text, value)
-        else
-            lbl.Text = string.format("%s: %d", text, value)
-        end
-        if callback then callback(value) end
+        lbl.Text = formatValue(value)
+        safeCall(currentCallback, value)
     end
 
     local dragging = false
     track.InputBegan:Connect(function(i)
+        if not currentEnabled then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            if inputBox.Visible then return end
             dragging = true
             updateFromInput(i)
         end
@@ -632,6 +1097,9 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
         end
     end)
 
+    if options.Tooltip then attachTooltip(track, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
+
     local obj = {}
     function obj:GetValue() return value end
     function obj:SetValue(val)
@@ -639,25 +1107,43 @@ function TabComponent:AddSlider(text, min, max, default, callback, optOptions)
         value = val
         local rel = (val - min) / (max - min)
         fill.Size = UDim2.new(rel, 0, 1, 0)
-        if isFloat then
-            lbl.Text = string.format("%s: %." .. decimals .. "f", text, val)
-        else
-            lbl.Text = string.format("%s: %d", text, math.floor(val + 0.5))
-        end
-        if callback then callback(val) end
+        lbl.Text = formatValue(val)
+        safeCall(currentCallback, val)
     end
-    function obj:SetCallback(cb) callback = cb end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        track.Active = state
+        if state then
+            track.BackgroundColor3 = options.Color or theme.SliderTrack
+            fill.BackgroundColor3 = theme.SliderFill
+            lbl.TextColor3 = theme.Text
+        else
+            track.BackgroundColor3 = disabledColor(options.Color or theme.SliderTrack)
+            fill.BackgroundColor3 = disabledColor(theme.SliderFill)
+            lbl.TextColor3 = disabledColor(theme.Text)
+        end
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
     function obj:GetInstance() return container end
+
+    local key = options.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return value end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddDropdown(text, options, default, callback, optOptions) ────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddDropdown
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddDropdown(text, options, default, callback, optOptions)
     local theme = getTheme(self)
     local opt = optOptions or {}
     local selected = default or options[1]
     local isOpen = false
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -709,14 +1195,14 @@ function TabComponent:AddDropdown(text, options, default, callback, optOptions)
 
             optBtn.MouseEnter:Connect(function() optBtn.TextColor3 = theme.Accent end)
             optBtn.MouseLeave:Connect(function() optBtn.TextColor3 = theme.TabNormalText end)
-
             optBtn.MouseButton1Click:Connect(function()
+                if not currentEnabled then return end
                 selected = optItem
                 header.Text = string.format(" %s: %s", text, tostring(selected))
                 isOpen = false
                 TweenService:Create(container, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, 24)}):Play()
                 TweenService:Create(listFrame, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, 0)}):Play()
-                if callback then callback(selected) end
+                safeCall(currentCallback, selected)
             end)
             table.insert(optionButtons, optBtn)
         end
@@ -726,15 +1212,18 @@ function TabComponent:AddDropdown(text, options, default, callback, optOptions)
             TweenService:Create(container, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, 26 + totalHeight)}):Play()
         end
     end
-
     rebuildOptions()
 
     header.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         isOpen = not isOpen
         local targetHeight = isOpen and (26 + (#options * 22)) or 24
         TweenService:Create(container, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, targetHeight)}):Play()
         TweenService:Create(listFrame, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, isOpen and #options * 22 or 0)}):Play()
     end)
+
+    if opt.Tooltip then attachTooltip(header, opt.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
 
     local obj = {}
     function obj:GetValue() return selected end
@@ -742,19 +1231,16 @@ function TabComponent:AddDropdown(text, options, default, callback, optOptions)
         if table.find(options, val) then
             selected = val
             header.Text = string.format(" %s: %s", text, tostring(selected))
-            if callback then callback(selected) end
+            safeCall(currentCallback, selected)
         end
     end
-    function obj:AddItem(item)
-        table.insert(options, item)
-        rebuildOptions()
-    end
+    function obj:AddItem(item) table.insert(options, item); rebuildOptions() end
     function obj:SetItems(items)
         options = items
         if not table.find(options, selected) then
             selected = options[1]
             header.Text = string.format(" %s: %s", text, tostring(selected))
-            if callback then callback(selected) end
+            safeCall(currentCallback, selected)
         end
         rebuildOptions()
     end
@@ -763,19 +1249,40 @@ function TabComponent:AddDropdown(text, options, default, callback, optOptions)
         selected = nil
         header.Text = string.format(" %s: ", text)
         rebuildOptions()
-        if callback then callback(nil) end
+        safeCall(currentCallback, nil)
     end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        header.Active = state
+        if state then
+            header.BackgroundColor3 = opt.Color or theme.FrameBg
+            header.TextColor3 = theme.Text
+        else
+            header.BackgroundColor3 = disabledColor(opt.Color or theme.FrameBg)
+            header.TextColor3 = disabledColor(theme.Text)
+        end
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
     function obj:GetInstance() return container end
+
+    local key = opt.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return selected end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddSearchableDropdown(text, options, default, callback, optOptions) ──
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddSearchableDropdown
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddSearchableDropdown(text, options, default, callback, optOptions)
     local theme = getTheme(self)
     local opt = optOptions or {}
     local selected = default or options[1]
     local isOpen = false
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -847,14 +1354,14 @@ function TabComponent:AddSearchableDropdown(text, options, default, callback, op
 
             btn.MouseEnter:Connect(function() btn.TextColor3 = theme.Accent end)
             btn.MouseLeave:Connect(function() btn.TextColor3 = theme.TabNormalText end)
-
             btn.MouseButton1Click:Connect(function()
+                if not currentEnabled then return end
                 selected = optItem
                 header.Text = string.format(" %s: %s", text, tostring(selected))
                 isOpen = false
                 TweenService:Create(container, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, 24)}):Play()
                 TweenService:Create(listFrame, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, 0)}):Play()
-                if callback then callback(selected) end
+                safeCall(currentCallback, selected)
             end)
             table.insert(optionButtons, btn)
         end
@@ -876,10 +1383,13 @@ function TabComponent:AddSearchableDropdown(text, options, default, callback, op
             TweenService:Create(listFrame, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, totalHeight)}):Play()
         end
     end
-
-    searchBox:GetPropertyChangedSignal("Text"):Connect(filterOptions)
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        if not currentEnabled then return end
+        filterOptions()
+    end)
 
     header.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         isOpen = not isOpen
         if isOpen then
             filterOptions()
@@ -889,51 +1399,68 @@ function TabComponent:AddSearchableDropdown(text, options, default, callback, op
         end
     end)
 
+    if opt.Tooltip then attachTooltip(header, opt.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
+
     local obj = {}
     function obj:GetValue() return selected end
     function obj:SetValue(val)
         if table.find(options, val) then
             selected = val
             header.Text = string.format(" %s: %s", text, tostring(selected))
-            if callback then callback(selected) end
+            safeCall(currentCallback, selected)
         end
     end
-    function obj:AddItem(item)
-        table.insert(options, item)
-        rebuildOptions()
-    end
+    function obj:AddItem(item) table.insert(options, item); rebuildOptions() end
     function obj:SetItems(items)
         options = items
         if not table.find(options, selected) then
             selected = options[1]
             header.Text = string.format(" %s: %s", text, tostring(selected))
-            if callback then callback(selected) end
+            safeCall(currentCallback, selected)
         end
-        rebuildOptions()
-        filterOptions()
+        rebuildOptions(); filterOptions()
     end
     function obj:Clear()
         options = {}
         selected = nil
         header.Text = string.format(" %s: ", text)
-        rebuildOptions()
-        filterOptions()
-        if callback then callback(nil) end
+        rebuildOptions(); filterOptions()
+        safeCall(currentCallback, nil)
     end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        header.Active = state
+        if state then
+            header.BackgroundColor3 = opt.Color or theme.FrameBg
+            header.TextColor3 = theme.Text
+        else
+            header.BackgroundColor3 = disabledColor(opt.Color or theme.FrameBg)
+            header.TextColor3 = disabledColor(theme.Text)
+        end
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
     function obj:GetInstance() return container end
+
+    local key = opt.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return selected end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddMultiSelectDropdown(text, options, defaults, callback, optOptions) ─
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddMultiSelectDropdown
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddMultiSelectDropdown(text, options, defaults, callback, optOptions)
     local theme = getTheme(self)
     local opt = optOptions or {}
     local selected = {}
-    if defaults then
-        for _, v in ipairs(defaults) do selected[v] = true end
-    end
+    if defaults then for _, v in ipairs(defaults) do selected[v] = true end end
     local isOpen = false
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -957,13 +1484,9 @@ function TabComponent:AddMultiSelectDropdown(text, options, defaults, callback, 
     local function updateHeader()
         local count = 0
         for _ in pairs(selected) do count = count + 1 end
-        if count == 0 then
-            header.Text = string.format(" %s: None", text)
-        elseif count == #options then
-            header.Text = string.format(" %s: All", text)
-        else
-            header.Text = string.format(" %s: %d selected", text, count)
-        end
+        if count == 0 then header.Text = string.format(" %s: None", text)
+        elseif count == #options then header.Text = string.format(" %s: All", text)
+        else header.Text = string.format(" %s: %d selected", text, count) end
     end
     updateHeader()
 
@@ -1042,16 +1565,14 @@ function TabComponent:AddMultiSelectDropdown(text, options, defaults, callback, 
 
             btn.MouseEnter:Connect(function() btn.TextColor3 = theme.Accent end)
             btn.MouseLeave:Connect(function() btn.TextColor3 = theme.TabNormalText end)
-
             btn.MouseButton1Click:Connect(function()
+                if not currentEnabled then return end
                 if selected[optItem] then selected[optItem] = nil else selected[optItem] = true end
                 checkIndicator.Text = selected[optItem] and "✓" or ""
                 updateHeader()
-                if callback then
-                    local t = {}
-                    for k in pairs(selected) do table.insert(t, k) end
-                    callback(t)
-                end
+                local t = {}
+                for k in pairs(selected) do table.insert(t, k) end
+                safeCall(currentCallback, t)
             end)
             optionButtons[optItem] = {btn = btn, check = checkIndicator}
         end
@@ -1067,6 +1588,7 @@ function TabComponent:AddMultiSelectDropdown(text, options, defaults, callback, 
     rebuildOptions()
 
     local function openClose()
+        if not currentEnabled then return end
         isOpen = not isOpen
         if isOpen then
             local totalHeight = 48 + #options * optionHeight
@@ -1082,25 +1604,26 @@ function TabComponent:AddMultiSelectDropdown(text, options, defaults, callback, 
 
     header.MouseButton1Click:Connect(openClose)
     selectAllBtn.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         for _, optItem in ipairs(options) do
             selected[optItem] = true
-            if optionButtons[optItem] then
-                optionButtons[optItem].check.Text = "✓"
-            end
+            if optionButtons[optItem] then optionButtons[optItem].check.Text = "✓" end
         end
         updateHeader()
-        if callback then callback(options) end
+        safeCall(currentCallback, options)
     end)
     deselectAllBtn.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         for k in pairs(selected) do selected[k] = nil end
         for _, optItem in ipairs(options) do
-            if optionButtons[optItem] then
-                optionButtons[optItem].check.Text = ""
-            end
+            if optionButtons[optItem] then optionButtons[optItem].check.Text = "" end
         end
         updateHeader()
-        if callback then callback({}) end
+        safeCall(currentCallback, {})
     end)
+
+    if opt.Tooltip then attachTooltip(header, opt.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
 
     local obj = {}
     function obj:GetValue()
@@ -1110,47 +1633,55 @@ function TabComponent:AddMultiSelectDropdown(text, options, defaults, callback, 
     end
     function obj:SetValue(tbl)
         selected = {}
-        if tbl then
-            for _, v in ipairs(tbl) do selected[v] = true end
-        end
+        if tbl then for _, v in ipairs(tbl) do selected[v] = true end end
         for k, data in pairs(optionButtons) do
             data.check.Text = selected[k] and "✓" or ""
         end
         updateHeader()
-        if callback then callback(obj:GetValue()) end
+        safeCall(currentCallback, obj:GetValue())
     end
-    function obj:AddItem(item)
-        table.insert(options, item)
-        rebuildOptions()
-    end
+    function obj:AddItem(item) table.insert(options, item); rebuildOptions() end
     function obj:SetItems(items)
         options = items
         selected = {}
-        rebuildOptions()
-        updateHeader()
-        if callback then callback({}) end
+        rebuildOptions(); updateHeader()
+        safeCall(currentCallback, {})
     end
     function obj:Clear()
         options = {}
         selected = {}
-        rebuildOptions()
-        updateHeader()
-        if callback then callback({}) end
+        rebuildOptions(); updateHeader()
+        safeCall(currentCallback, {})
     end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        header.Active = state
+        header.BackgroundColor3 = state and (opt.Color or theme.FrameBg)
+                                        or disabledColor(opt.Color or theme.FrameBg)
+        header.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
     function obj:GetInstance() return container end
+
+    local key = opt.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return obj:GetValue() end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddMultiSelectSearchableDropdown(text, options, defaults, callback, optOptions) ─
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddMultiSelectSearchableDropdown
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddMultiSelectSearchableDropdown(text, options, defaults, callback, optOptions)
     local theme = getTheme(self)
     local opt = optOptions or {}
     local selected = {}
-    if defaults then
-        for _, v in ipairs(defaults) do selected[v] = true end
-    end
+    if defaults then for _, v in ipairs(defaults) do selected[v] = true end end
     local isOpen = false
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -1174,13 +1705,9 @@ function TabComponent:AddMultiSelectSearchableDropdown(text, options, defaults, 
     local function updateHeader()
         local count = 0
         for _ in pairs(selected) do count = count + 1 end
-        if count == 0 then
-            header.Text = string.format(" %s: None", text)
-        elseif count == #options then
-            header.Text = string.format(" %s: All", text)
-        else
-            header.Text = string.format(" %s: %d selected", text, count)
-        end
+        if count == 0 then header.Text = string.format(" %s: None", text)
+        elseif count == #options then header.Text = string.format(" %s: All", text)
+        else header.Text = string.format(" %s: %d selected", text, count) end
     end
     updateHeader()
 
@@ -1249,14 +1776,13 @@ function TabComponent:AddMultiSelectSearchableDropdown(text, options, defaults, 
             btn.MouseEnter:Connect(function() if btn.Visible then btn.TextColor3 = theme.Accent end end)
             btn.MouseLeave:Connect(function() if btn.Visible then btn.TextColor3 = theme.TabNormalText end end)
             btn.MouseButton1Click:Connect(function()
+                if not currentEnabled then return end
                 if selected[optItem] then selected[optItem] = nil else selected[optItem] = true end
                 checkIndicator.Text = selected[optItem] and "✓" or ""
                 updateHeader()
-                if callback then
-                    local t = {}
-                    for k in pairs(selected) do table.insert(t, k) end
-                    callback(t)
-                end
+                local t = {}
+                for k in pairs(selected) do table.insert(t, k) end
+                safeCall(currentCallback, t)
             end)
             optionButtons[optItem] = {btn = btn, check = checkIndicator}
         end
@@ -1282,9 +1808,13 @@ function TabComponent:AddMultiSelectSearchableDropdown(text, options, defaults, 
         end
     end
 
-    searchBox:GetPropertyChangedSignal("Text"):Connect(filterAndResize)
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        if not currentEnabled then return end
+        filterAndResize()
+    end)
 
     header.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         isOpen = not isOpen
         if isOpen then
             filterAndResize()
@@ -1294,6 +1824,9 @@ function TabComponent:AddMultiSelectSearchableDropdown(text, options, defaults, 
         end
     end)
 
+    if opt.Tooltip then attachTooltip(header, opt.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
+
     local obj = {}
     function obj:GetValue()
         local t = {}
@@ -1302,48 +1835,55 @@ function TabComponent:AddMultiSelectSearchableDropdown(text, options, defaults, 
     end
     function obj:SetValue(tbl)
         selected = {}
-        if tbl then
-            for _, v in ipairs(tbl) do selected[v] = true end
-        end
+        if tbl then for _, v in ipairs(tbl) do selected[v] = true end end
         for k, data in pairs(optionButtons) do
             data.check.Text = selected[k] and "✓" or ""
         end
         updateHeader()
-        if callback then callback(obj:GetValue()) end
+        safeCall(currentCallback, obj:GetValue())
     end
-    function obj:AddItem(item)
-        table.insert(options, item)
-        rebuildOptions()
-        filterAndResize()
-    end
+    function obj:AddItem(item) table.insert(options, item); rebuildOptions(); filterAndResize() end
     function obj:SetItems(items)
         options = items
         selected = {}
-        rebuildOptions()
-        updateHeader()
-        filterAndResize()
-        if callback then callback({}) end
+        rebuildOptions(); updateHeader(); filterAndResize()
+        safeCall(currentCallback, {})
     end
     function obj:Clear()
         options = {}
         selected = {}
-        rebuildOptions()
-        updateHeader()
-        filterAndResize()
-        if callback then callback({}) end
+        rebuildOptions(); updateHeader(); filterAndResize()
+        safeCall(currentCallback, {})
     end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        header.Active = state
+        header.BackgroundColor3 = state and (opt.Color or theme.FrameBg)
+                                        or disabledColor(opt.Color or theme.FrameBg)
+        header.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
     function obj:GetInstance() return container end
+
+    local key = opt.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return obj:GetValue() end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddColorPicker(text, defaultColor, callback, optOptions) ─────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddColorPicker
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddColorPicker(text, defaultColor, callback, optOptions)
     local theme = getTheme(self)
     local opt = optOptions or {}
     local color = defaultColor or Color3.new(1, 1, 1)
     local r, g, b = color.R, color.G, color.B
     local isOpen = false
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -1382,6 +1922,7 @@ function TabComponent:AddColorPicker(text, defaultColor, callback, optOptions)
     applyBorder(expandFrame, theme.Border)
 
     header.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         isOpen = not isOpen
         local targetHeight = isOpen and (24 + 90) or 24
         TweenService:Create(container, TWEEN_FAST, {Size = UDim2.new(1, 0, 0, targetHeight)}):Play()
@@ -1423,12 +1964,13 @@ function TabComponent:AddColorPicker(text, defaultColor, callback, optOptions)
 
         local dragging = false
         local function onDrag(input)
+            if not currentEnabled then return end
             local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
             handle.Position = UDim2.new(rel, 0, 0.5, 0)
             fill.Size = UDim2.new(rel, 0, 1, 0)
             channelUpdater(rel)
             preview.BackgroundColor3 = Color3.new(r, g, b)
-            if callback then callback(Color3.new(r, g, b)) end
+            safeCall(currentCallback, Color3.new(r, g, b))
         end
 
         handle.InputBegan:Connect(function(i)
@@ -1449,18 +1991,40 @@ function TabComponent:AddColorPicker(text, defaultColor, callback, optOptions)
     createChannelSlider("G", 34, g, function(v) g = v end)
     createChannelSlider("B", 60, b, function(v) b = v end)
 
+    if opt.Tooltip then attachTooltip(header, opt.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
+
     local obj = {}
     function obj:GetColor() return Color3.new(r, g, b) end
     function obj:SetColor(clr)
         r, g, b = clr.R, clr.G, clr.B
         preview.BackgroundColor3 = clr
-        if callback then callback(clr) end
+        safeCall(currentCallback, clr)
     end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        header.Active = state
+        header.BackgroundColor3 = state and (opt.Color or theme.FrameBg)
+                                        or disabledColor(opt.Color or theme.FrameBg)
+        header.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
+
+    local key = opt.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(
+        key,
+        function() return { r = r, g = g, b = b } end,
+        function(v) obj:SetColor(Color3.new(v.r, v.g, v.b)) end
+    )
+
     return obj
 end
 
--- ── Tab:AddLabel(text, color, optOptions) ─────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddLabel
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddLabel(text, color, optOptions)
     local theme = getTheme(self)
     local options = optOptions or {}
@@ -1484,6 +2048,9 @@ function TabComponent:AddLabel(text, color, optOptions)
         lbl.Size = UDim2.new(1, 0, 0, lbl.TextBounds.Y + 2)
     end)
 
+    if options.Tooltip then attachTooltip(lbl, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(lbl, text) end
+
     local obj = {}
     function obj:SetText(t) lbl.Text = t end
     function obj:GetText() return lbl.Text end
@@ -1491,7 +2058,7 @@ function TabComponent:AddLabel(text, color, optOptions)
     return obj
 end
 
--- ── Tab:AddSection(text) ─────────────────────────────────────────────────────
+-- ── AddSection ────────────────────────────────────────────────────────────────
 function TabComponent:AddSection(text)
     local theme = getTheme(self)
     local lbl = Instance.new("TextLabel")
@@ -1507,7 +2074,7 @@ function TabComponent:AddSection(text)
     return { GetInstance = function() return lbl end, SetText = function(t) lbl.Text = "── " .. t .. " ──" end }
 end
 
--- ── Tab:AddSeparator() ───────────────────────────────────────────────────────
+-- ── AddSeparator ──────────────────────────────────────────────────────────────
 function TabComponent:AddSeparator()
     local theme = getTheme(self)
     local sep = Instance.new("Frame")
@@ -1518,11 +2085,15 @@ function TabComponent:AddSeparator()
     return { GetInstance = function() return sep end }
 end
 
--- ── Tab:AddTextBox(text, placeholder, default, callback, optOptions) ─────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddTextBox
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddTextBox(text, placeholder, default, callback, optOptions)
     local theme = getTheme(self)
     local options = optOptions or {}
     local currentText = default or ""
+    local currentCallback = callback
+    local currentEnabled = true
 
     local row = Instance.new("Frame")
     row.BackgroundTransparency = 1
@@ -1557,30 +2128,49 @@ function TabComponent:AddTextBox(text, placeholder, default, callback, optOption
     applyCorner(box, 2)
     applyBorder(box, theme.Border)
 
-    if callback then
-        box:GetPropertyChangedSignal("Text"):Connect(function()
-            currentText = box.Text
-            callback(currentText)
-        end)
-    end
+    box:GetPropertyChangedSignal("Text"):Connect(function()
+        if not currentEnabled then return end
+        currentText = box.Text
+        safeCall(currentCallback, currentText)
+    end)
+
+    if options.Tooltip then attachTooltip(box, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(row, text) end
 
     local obj = {}
     function obj:GetValue() return box.Text end
     function obj:SetValue(txt)
         box.Text = txt
         currentText = txt
-        if callback then callback(txt) end
+        safeCall(currentCallback, txt)
     end
     function obj:Clear() obj:SetValue("") end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        box.Active = state
+        box.BackgroundColor3 = state and (options.Color or theme.FrameBg)
+                                     or disabledColor(options.Color or theme.FrameBg)
+        box.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() row:Destroy() end
     function obj:GetInstance() return row end
+
+    local key = options.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return box.Text end, function(v) obj:SetValue(v) end)
+
     return obj
 end
 
--- ── Tab:AddCodeEditor(text, placeholder, defaultText, callback) ──────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddCodeEditor
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddCodeEditor(text, placeholder, defaultText, callback)
     local theme = getTheme(self)
     local currentText = defaultText or ""
+    local currentCallback = callback
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -1630,33 +2220,43 @@ function TabComponent:AddCodeEditor(text, placeholder, defaultText, callback)
         local textSize = TextService:GetTextSize(box.Text, box.TextSize, box.Font, Vector2.new(scroll.AbsoluteSize.X - 16, math.huge))
         box.Size = UDim2.new(1, -8, 0, math.max(textSize.Y + 8, 80))
         scroll.CanvasSize = UDim2.new(0, 0, 0, math.max(textSize.Y + 16, 200))
+        if currentEnabled then
+            currentText = box.Text
+            safeCall(currentCallback, currentText)
+        end
     end)
 
-    if callback then
-        box:GetPropertyChangedSignal("Text"):Connect(function()
-            currentText = box.Text
-            callback(currentText)
-        end)
-    end
+    if self._window then self._window:_registerSearch(container, text) end
 
     local obj = {}
     function obj:GetText() return box.Text end
     function obj:SetText(txt) box.Text = txt end
     function obj:Clear() box.Text = "" end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        box.Active = state
+        box.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function obj:IsEnabled() return currentEnabled end
     function obj:Destroy() container:Destroy() end
+
+    local key = "codeeditor::" .. text
+    self._window:_registerState(key, function() return box.Text end, function(v) obj:SetText(v) end)
+
     return obj
 end
 
--- ── Tab:AddGraph(title, maxPoints, options) ─────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddGraph
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddGraph(title, maxPoints, options)
     local RunService = cloneref(game:GetService("RunService"))
     local theme      = getTheme(self)
-
     options = options or {}
     if type(options) == "userdata" and options:IsA("Color3") then
         options = { LineColor = options }
     end
-
     local lineColor   = options.LineColor   or theme.GraphLine
     local yMin        = options.YMin
     local yMax        = options.YMax
@@ -1713,25 +2313,17 @@ function TabComponent:AddGraph(title, maxPoints, options)
     local function cr(p0, p1, p2, p3, t)
         local t2 = t * t
         local t3 = t2 * t
-        return 0.5 * (
-            (2 * p1) +
-            (-p0 + p2) * t +
-            (2*p0 - 5*p1 + 4*p2 - p3) * t2 +
-            (-p0 + 3*p1 - 3*p2 + p3) * t3
-        )
+        return 0.5 * ((2*p1) + (-p0 + p2)*t + (2*p0 - 5*p1 + 4*p2 - p3)*t2 + (-p0 + 3*p1 - 3*p2 + p3)*t3)
     end
 
     local function redraw()
-        local W = graphFrame.AbsoluteSize.X
-        local H = graphFrame.AbsoluteSize.Y
+        local W, H = graphFrame.AbsoluteSize.X, graphFrame.AbsoluteSize.Y
         if W <= 0 or H <= 0 or bufSize < 2 then
             for i = 1, maxLines do pool[i].Visible = false end
             return
         end
-
         local lo, hi
-        if yMin and yMax then
-            lo, hi = yMin, yMax
+        if yMin and yMax then lo, hi = yMin, yMax
         else
             lo, hi = math.huge, -math.huge
             for i = 1, bufSize do
@@ -1742,27 +2334,22 @@ function TabComponent:AddGraph(title, maxPoints, options)
             if lo == hi then hi = lo + 1 end
         end
         local range = hi - lo
-
-        local PAD  = 3
+        local PAD = 3
         local drawH = H - PAD * 2
-        local px = table.create(bufSize)
-        local py = table.create(bufSize)
+        local px, py = table.create(bufSize), table.create(bufSize)
         for i = 1, bufSize do
             local v = buf[((bufHead - 1 + i - 1) % maxPoints) + 1]
             px[i] = (i - 1) / (bufSize - 1) * W
             py[i] = PAD + drawH - ((v - lo) / range) * drawH
         end
-
         local intervals  = bufSize - 1
         local stepsEach  = math.max(1, math.floor(maxLines / intervals))
         local used = 0
-
         for i = 1, intervals do
             local i0 = math.max(1, i - 1)
             local i2 = math.min(bufSize, i + 1)
             local i3 = math.min(bufSize, i + 2)
             local lx, ly = px[i], py[i]
-
             for s = 1, stepsEach do
                 local t  = s / stepsEach
                 local nx = cr(px[i0], px[i], px[i2], px[i3], t)
@@ -1781,522 +2368,87 @@ function TabComponent:AddGraph(title, maxPoints, options)
                 lx, ly = nx, ny
             end
         end
-
-        for i = used + 1, maxLines do
-            pool[i].Visible = false
-        end
+        for i = used + 1, maxLines do pool[i].Visible = false end
     end
 
-    local hbConn = RunService.Heartbeat:Connect(function()
-        if dirty then dirty = false; redraw() end
-    end)
-
+    local hbConn = RunService.Heartbeat:Connect(function() if dirty then dirty = false; redraw() end end)
     graphFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() dirty = true end)
+
+    if self._window then self._window:_registerSearch(container, title) end
 
     local graphObj = {}
     function graphObj:Push(rawValue)
-        if smoothed == nil then
-            smoothed = rawValue
-        else
-            smoothed = smoothed + (rawValue - smoothed) * smoothAlpha
-        end
+        if smoothed == nil then smoothed = rawValue
+        else smoothed = smoothed + (rawValue - smoothed) * smoothAlpha end
         local tail = ((bufHead - 1 + bufSize) % maxPoints) + 1
         buf[tail] = smoothed
-        if bufSize < maxPoints then
-            bufSize = bufSize + 1
-        else
-            bufHead = (bufHead % maxPoints) + 1
-        end
+        if bufSize < maxPoints then bufSize = bufSize + 1
+        else bufHead = (bufHead % maxPoints) + 1 end
         dirty = true
     end
     function graphObj:SetColor(color)
         lineColor = color
         for i = 1, maxLines do pool[i].BackgroundColor3 = color end
     end
-    function graphObj:Clear()
-        bufSize = 0
-        bufHead = 1
-        smoothed = nil
-        dirty = true
-    end
-    function graphObj:Destroy()
-        hbConn:Disconnect()
-        container:Destroy()
-    end
+    function graphObj:Clear() bufSize = 0; bufHead = 1; smoothed = nil; dirty = true end
+    function graphObj:Destroy() hbConn:Disconnect(); container:Destroy() end
     return graphObj
 end
 
--- ── Window:CreateWatermark(text, options) ───────────────────────────────────
-function RGui:CreateWatermark(text, options)
-    local theme = self._theme
-    options = options or {}
-
-    local wmGui = Instance.new("ScreenGui")
-    wmGui.Name = "RGui_Watermark"
-    wmGui.ResetOnSpawn = false
-    wmGui.Parent = CoreGui
-
-    local wmFrame = Instance.new("Frame")
-    wmFrame.BackgroundColor3 = options.BackgroundColor or theme.TitleBg
-    wmFrame.BackgroundTransparency = options.BackgroundTransparency or 0.4
-    wmFrame.Position = options.Position or UDim2.new(0, 10, 0, 10)
-    wmFrame.Size = UDim2.new(0, 0, 0, 0)
-    wmFrame.Parent = wmGui
-    applyCorner(wmFrame, 2)
-    applyBorder(wmFrame, theme.Border)
-
-    local icon
-    if options.Icon then
-        icon = Instance.new("ImageLabel")
-        icon.BackgroundTransparency = 1
-        icon.Size = UDim2.new(0, 20, 0, 20)
-        icon.Position = UDim2.new(0, 4, 0.5, -10)
-        icon.Image = options.Icon
-        icon.Parent = wmFrame
-    end
-
-    local wmLabel = Instance.new("TextLabel")
-    wmLabel.BackgroundTransparency = 1
-    wmLabel.Font = Enum.Font.RobotoMono
-    wmLabel.Text = text
-    wmLabel.TextColor3 = options.TextColor or theme.Text
-    wmLabel.TextSize = options.TextSize or 13
-    wmLabel.TextXAlignment = Enum.TextXAlignment.Left
-    wmLabel.RichText = true
-    wmLabel.Parent = wmFrame
-
-    if icon then
-        wmLabel.Position = UDim2.new(0, 28, 0, 0)
-        wmLabel.Size = UDim2.new(1, -32, 1, 0)
-    else
-        wmLabel.Position = UDim2.new(0, 8, 0, 0)
-        wmLabel.Size = UDim2.new(1, -16, 1, 0)
-    end
-
-    local function updateSize()
-        local textBounds = TextService:GetTextSize(wmLabel.Text, wmLabel.TextSize, wmLabel.Font, Vector2.new(math.huge, math.huge))
-        wmFrame.Size = UDim2.new(0, textBounds.X + 16 + (icon and 24 or 0), 0, math.max(textBounds.Y + 8, 24))
-    end
-    updateSize()
-
-    makeDraggable(wmFrame, wmFrame)
-
-    local wmObj = {}
-    function wmObj:Update(newText, newOptions)
-        if newText ~= nil then wmLabel.Text = newText end
-        if newOptions then
-            if newOptions.Icon ~= nil then
-                if newOptions.Icon == "" or newOptions.Icon == false then
-                    if icon then icon:Destroy(); icon = nil; wmLabel.Position = UDim2.new(0, 8, 0, 0); wmLabel.Size = UDim2.new(1, -16, 1, 0) end
-                else
-                    if not icon then
-                        icon = Instance.new("ImageLabel"); icon.BackgroundTransparency = 1; icon.Size = UDim2.new(0, 20, 0, 20); icon.Position = UDim2.new(0, 4, 0.5, -10); icon.Parent = wmFrame
-                        wmLabel.Position = UDim2.new(0, 28, 0, 0); wmLabel.Size = UDim2.new(1, -32, 1, 0)
-                    end
-                    icon.Image = newOptions.Icon
-                end
-            end
-            if newOptions.TextColor then wmLabel.TextColor3 = newOptions.TextColor end
-            if newOptions.TextSize then wmLabel.TextSize = newOptions.TextSize end
-            if newOptions.BackgroundColor then wmFrame.BackgroundColor3 = newOptions.BackgroundColor end
-            if newOptions.BackgroundTransparency then wmFrame.BackgroundTransparency = newOptions.BackgroundTransparency end
-            if newOptions.Position then wmFrame.Position = newOptions.Position end
-            if newOptions.Font then wmLabel.Font = newOptions.Font end
-        end
-        updateSize()
-    end
-    function wmObj:Destroy() wmGui:Destroy() end
-    self._watermark = wmObj
-    return wmObj
-end
-
--- ── Window:CreateKeySystem(config) ────────────────────────────────────────────
-function RGui:CreateKeySystem(config)
-    local theme = self._theme
-    local services = config.Services or {}
-    local description = config.Description or "Enter your key to continue."
-    local title = config.Title or "Key System"
-    local onSuccess = config.Callback or function() end
-
-    local serviceNames = {}
-    for name, data in pairs(services) do table.insert(serviceNames, name) end
-    if #serviceNames == 0 then
-        serviceNames = {"No service available"}
-        services = {["No service available"] = {Validate = function() return true end}}
-    end
-
-    local keyScreen = Instance.new("ScreenGui")
-    keyScreen.Name = "RGui_KeySystem"
-    keyScreen.ResetOnSpawn = false
-    keyScreen.Parent = CoreGui
-
-    local mainFrame = Instance.new("Frame")
-    mainFrame.BackgroundColor3 = theme.WindowBg
-    mainFrame.Position = UDim2.new(0.5, -200, 0.4, 0)
-    mainFrame.Size = UDim2.new(0, 400, 0, 180)
-    mainFrame.ClipsDescendants = false
-    mainFrame.Parent = keyScreen
-    applyCorner(mainFrame, 4)
-    applyBorder(mainFrame, theme.Border)
-
-    local titleBar = Instance.new("Frame")
-    titleBar.BackgroundColor3 = theme.TitleBg
-    titleBar.Size = UDim2.new(1, 0, 0, 24)
-    titleBar.Parent = mainFrame
-    applyCorner(titleBar, 4)
-
-    local titleLbl = Instance.new("TextLabel")
-    titleLbl.BackgroundTransparency = 1
-    titleLbl.Font = Enum.Font.RobotoMono
-    titleLbl.Text = " " .. title
-    titleLbl.TextColor3 = theme.Text
-    titleLbl.TextSize = 13
-    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-    titleLbl.Parent = titleBar
-
-    if config.Icon then
-        local icon = Instance.new("ImageLabel")
-        icon.BackgroundTransparency = 1
-        icon.Size = UDim2.new(0, 20, 0, 20)
-        icon.Position = UDim2.new(0, 4, 0.5, -10)
-        icon.Image = config.Icon
-        icon.Parent = titleBar
-        titleLbl.Position = UDim2.new(0, 28, 0, 0)
-        titleLbl.Size = UDim2.new(1, -52, 1, 0)
-    else
-        titleLbl.Position = UDim2.new(0, 8, 0, 0)
-        titleLbl.Size = UDim2.new(1, -28, 1, 0)
-    end
-
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.BackgroundTransparency = 1
-    closeBtn.Position = UDim2.new(1, -20, 0, 0)
-    closeBtn.Size = UDim2.new(0, 20, 1, 0)
-    closeBtn.Font = Enum.Font.RobotoMono
-    closeBtn.Text = "×"
-    closeBtn.TextColor3 = theme.SubText
-    closeBtn.TextSize = 14
-    closeBtn.Parent = titleBar
-    closeBtn.MouseButton1Click:Connect(function() keyScreen:Destroy() end)
-
-    makeDraggable(mainFrame, titleBar)
-
-    local leftPanel = Instance.new("Frame")
-    leftPanel.BackgroundTransparency = 1
-    leftPanel.Position = UDim2.new(0, 8, 0, 30)
-    leftPanel.Size = UDim2.new(0, 180, 1, -38)
-    leftPanel.ClipsDescendants = false
-    leftPanel.Parent = mainFrame
-
-    local scriptTitle = Instance.new("TextLabel")
-    scriptTitle.BackgroundTransparency = 1
-    scriptTitle.Size = UDim2.new(1, 0, 0, 18)
-    scriptTitle.Font = Enum.Font.RobotoMono
-    scriptTitle.Text = config.ScriptTitle or "My Script"
-    scriptTitle.TextColor3 = theme.Accent
-    scriptTitle.TextSize = 13
-    scriptTitle.TextXAlignment = Enum.TextXAlignment.Left
-    scriptTitle.Parent = leftPanel
-
-    local inputRow = Instance.new("Frame")
-    inputRow.BackgroundTransparency = 1
-    inputRow.Position = UDim2.new(0, 0, 0, 26)
-    inputRow.Size = UDim2.new(1, 0, 0, 24)
-    inputRow.Parent = leftPanel
-
-    local keyInput = Instance.new("TextBox")
-    keyInput.BackgroundColor3 = theme.FrameBg
-    keyInput.Size = UDim2.new(1, -28, 1, 0)
-    keyInput.Font = Enum.Font.RobotoMono
-    keyInput.PlaceholderText = "Enter key..."
-    keyInput.PlaceholderColor3 = theme.SubText
-    keyInput.Text = ""
-    keyInput.TextColor3 = theme.Text
-    keyInput.TextSize = 13
-    keyInput.Parent = inputRow
-    applyCorner(keyInput, 2)
-    applyBorder(keyInput, theme.Border)
-
-    local copyBtn = Instance.new("TextButton")
-    copyBtn.BackgroundColor3 = theme.FrameBg
-    copyBtn.Size = UDim2.new(0, 24, 1, 0)
-    copyBtn.Position = UDim2.new(1, -24, 0, 0)
-    copyBtn.Font = Enum.Font.RobotoMono
-    copyBtn.Text = "📋"
-    copyBtn.TextColor3 = theme.Text
-    copyBtn.TextSize = 14
-    copyBtn.Visible = false
-    copyBtn.Parent = inputRow
-    applyCorner(copyBtn, 2)
-    applyBorder(copyBtn, theme.Border)
-
-    copyBtn.MouseButton1Click:Connect(function()
-        local serviceData = services[selectedService]
-        local toCopy = serviceData.CopyLink or serviceData.CopyKey
-        if toCopy then
-            -- Use setclipboard/toclipboard (standard exploit functions)
-            if setclipboard then
-                setclipboard(toCopy)
-            elseif toclipboard then
-                toclipboard(toCopy)
-            end
-            copyBtn.BackgroundColor3 = theme.Accent
-            task.delay(0.2, function() copyBtn.BackgroundColor3 = theme.FrameBg end)
-            self:Notify("Copied!", "The key/link has been copied.", 2, { Color = theme.Accent })
-        end
-    end)
-
-    local serviceBtn = Instance.new("TextButton")
-    serviceBtn.BackgroundColor3 = theme.FrameBg
-    serviceBtn.Position = UDim2.new(0, 0, 0, 60)
-    serviceBtn.Size = UDim2.new(1, 0, 0, 24)
-    serviceBtn.Font = Enum.Font.RobotoMono
-    serviceBtn.Text = "  " .. serviceNames[1]
-    serviceBtn.TextColor3 = theme.Text
-    serviceBtn.TextSize = 13
-    serviceBtn.TextXAlignment = Enum.TextXAlignment.Left
-    serviceBtn.Parent = leftPanel
-    applyCorner(serviceBtn, 2)
-    applyBorder(serviceBtn, theme.Border)
-
-    local serviceList = Instance.new("Frame")
-    serviceList.BackgroundColor3 = theme.TabNormal
-    serviceList.Size = UDim2.new(0, 180, 0, 0)
-    serviceList.Visible = false
-    serviceList.ZIndex = 10
-    serviceList.Parent = mainFrame
-    applyBorder(serviceList, theme.Border)
-
-    local serviceLayout = Instance.new("UIListLayout")
-    serviceLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    serviceLayout.Parent = serviceList
-
-    local selectedService = serviceNames[1]
-    local serviceButtons = {}
-    for i, srv in ipairs(serviceNames) do
-        local btn = Instance.new("TextButton")
-        btn.BackgroundTransparency = 1
-        btn.Size = UDim2.new(1, 0, 0, 22)
-        btn.Font = Enum.Font.RobotoMono
-        btn.Text = " " .. srv
-        btn.TextColor3 = theme.TabNormalText
-        btn.TextSize = 12
-        btn.TextXAlignment = Enum.TextXAlignment.Left
-        btn.LayoutOrder = i
-        btn.ZIndex = 10
-        btn.Parent = serviceList
-
-        btn.MouseEnter:Connect(function() btn.TextColor3 = theme.Accent end)
-        btn.MouseLeave:Connect(function() btn.TextColor3 = theme.TabNormalText end)
-        btn.MouseButton1Click:Connect(function()
-            selectedService = srv
-            serviceBtn.Text = "  " .. srv
-            serviceList.Visible = false
-            TweenService:Create(serviceList, TWEEN_FAST, {Size = UDim2.new(0, 180, 0, 0)}):Play()
-            local data = services[srv]
-            copyBtn.Visible = data and (data.CopyLink or data.CopyKey) ~= nil
-            keyInput.Size = copyBtn.Visible and UDim2.new(1, -28, 1, 0) or UDim2.new(1, 0, 1, 0)
-        end)
-        serviceButtons[srv] = btn
-    end
-
-    local isServiceOpen = false
-    serviceBtn.MouseButton1Click:Connect(function()
-        isServiceOpen = not isServiceOpen
-        if isServiceOpen then
-            local absPos = serviceBtn.AbsolutePosition
-            local absSize = serviceBtn.AbsoluteSize
-            serviceList.Position = UDim2.new(0, absPos.X - mainFrame.AbsolutePosition.X,
-                                             0, absPos.Y + absSize.Y - mainFrame.AbsolutePosition.Y)
-            serviceList.Visible = true
-            local listHeight = #serviceNames * 22
-            TweenService:Create(serviceList, TWEEN_FAST, {Size = UDim2.new(0, 180, 0, listHeight)}):Play()
-        else
-            TweenService:Create(serviceList, TWEEN_FAST, {Size = UDim2.new(0, 180, 0, 0)}):Play()
-            task.delay(0.1, function() serviceList.Visible = false end)
-        end
-    end)
-
-    local submitBtn = Instance.new("TextButton")
-    submitBtn.BackgroundColor3 = theme.FrameBg
-    submitBtn.Position = UDim2.new(0, 0, 1, -28)
-    submitBtn.Size = UDim2.new(1, 0, 0, 24)
-    submitBtn.Font = Enum.Font.RobotoMono
-    submitBtn.Text = "Check Key"
-    submitBtn.TextColor3 = theme.Text
-    submitBtn.TextSize = 13
-    submitBtn.Parent = leftPanel
-    applyCorner(submitBtn, 2)
-    applyBorder(submitBtn, theme.Border)
-
-    submitBtn.MouseButton1Click:Connect(function()
-        local service = services[selectedService]
-        if service and service.Validate then
-            local key = keyInput.Text
-            if service.Validate(key) then
-                onSuccess(selectedService, key)
-                keyScreen:Destroy()
-            else
-                local origColor = keyInput.BackgroundColor3
-                keyInput.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-                task.delay(0.3, function() keyInput.BackgroundColor3 = origColor end)
-            end
-        end
-    end)
-
-    local rightPanel = Instance.new("Frame")
-    rightPanel.BackgroundColor3 = theme.FrameBg
-    rightPanel.Position = UDim2.new(0, 196, 0, 30)
-    rightPanel.Size = UDim2.new(0, 196, 1, -38)
-    rightPanel.Parent = mainFrame
-    applyCorner(rightPanel, 2)
-    applyBorder(rightPanel, theme.Border)
-
-    local descLabel = Instance.new("TextLabel")
-    descLabel.BackgroundTransparency = 1
-    descLabel.Position = UDim2.new(0, 6, 0, 6)
-    descLabel.Size = UDim2.new(1, -12, 1, -12)
-    descLabel.Font = Enum.Font.RobotoMono
-    descLabel.Text = description
-    descLabel.TextColor3 = theme.SubText
-    descLabel.TextSize = 12
-    descLabel.TextWrapped = true
-    descLabel.Parent = rightPanel
-
-    local initialData = services[selectedService]
-    if initialData and (initialData.CopyLink or initialData.CopyKey) then
-        copyBtn.Visible = true
-        keyInput.Size = UDim2.new(1, -28, 1, 0)
-    end
-
-    local keySys = {}
-    function keySys:Destroy() keyScreen:Destroy() end
-    return keySys
-end
-
--- ── Notification System (ImGui Style) ───────────────────────────────────────
-function RGui:Notify(title, message, duration, options)
-    local theme = self._theme
-    duration = duration or 3
-    options = options or {}
-
-    if not self._notificationGui then
-        local gui = Instance.new("ScreenGui")
-        gui.Name = "RGui_Notifications"
-        gui.ResetOnSpawn = false
-        gui.Parent = CoreGui
-        self._notificationGui = gui
-    end
-
-    local width = 240
-    local height = 75
-    local headerHeight = 22
-    local margin = 10
-
-    local frame = Instance.new("Frame")
-    frame.BackgroundColor3 = options.BackgroundColor or theme.NotifyBg
-    frame.BorderSizePixel = 0
-    frame.Size = UDim2.new(0, width, 0, height)
-    frame.ClipsDescendants = true
-    frame.Parent = self._notificationGui
-    applyCorner(frame, 2)
-    applyBorder(frame, theme.Border)
-
-    local titleBar = Instance.new("Frame")
-    titleBar.BackgroundColor3 = options.Color or theme.TitleBg
-    titleBar.BorderSizePixel = 0
-    titleBar.Size = UDim2.new(1, 0, 0, headerHeight)
-    titleBar.Parent = frame
-
-    local titleLabel = Instance.new("TextLabel")
-    titleLabel.BackgroundTransparency = 1
-    titleLabel.Font = Enum.Font.RobotoMono
-    titleLabel.Text = title or "Notification"
-    titleLabel.TextColor3 = options.TitleColor or theme.NotifyTitle
-    titleLabel.TextSize = 13
-    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    titleLabel.Position = UDim2.new(0, 8, 0, 0)
-    titleLabel.Size = UDim2.new(1, -30, 1, 0)
-    titleLabel.Parent = titleBar
-
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.BackgroundTransparency = 1
-    closeBtn.Position = UDim2.new(1, -headerHeight, 0, 0)
-    closeBtn.Size = UDim2.new(0, headerHeight, 0, headerHeight)
-    closeBtn.Font = Enum.Font.RobotoMono
-    closeBtn.Text = "×"
-    closeBtn.TextColor3 = theme.SubText
-    closeBtn.TextSize = 16
-    closeBtn.Parent = titleBar
-
-    closeBtn.MouseEnter:Connect(function() closeBtn.TextColor3 = theme.Text end)
-    closeBtn.MouseLeave:Connect(function() closeBtn.TextColor3 = theme.SubText end)
-    closeBtn.MouseButton1Click:Connect(function() frame:Destroy() end)
-
-    local msgLabel = Instance.new("TextLabel")
-    msgLabel.BackgroundTransparency = 1
-    msgLabel.Font = Enum.Font.RobotoMono
-    msgLabel.Text = message or ""
-    msgLabel.TextColor3 = options.MessageColor or theme.NotifyMsg
-    msgLabel.TextSize = 13
-    msgLabel.TextWrapped = true
-    msgLabel.TextXAlignment = Enum.TextXAlignment.Left
-    msgLabel.TextYAlignment = Enum.TextYAlignment.Top
-    msgLabel.Position = UDim2.new(0, 8, 0, headerHeight + 6)
-    msgLabel.Size = UDim2.new(1, -16, 1, -(headerHeight + 12))
-    msgLabel.Parent = frame
-
-    local timerBarBg = Instance.new("Frame")
-    timerBarBg.BackgroundColor3 = theme.Border
-    timerBarBg.BorderSizePixel = 0
-    timerBarBg.Size = UDim2.new(1, 0, 0, 2)
-    timerBarBg.Position = UDim2.new(0, 0, 1, -2)
-    timerBarBg.Parent = frame
-
-    local timerBar = Instance.new("Frame")
-    timerBar.BackgroundColor3 = options.Color or theme.Accent
-    timerBar.BorderSizePixel = 0
-    timerBar.Size = UDim2.new(1, 0, 1, 0)
-    timerBar.Parent = timerBarBg
-
-    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-    local tween = TweenService:Create(timerBar, tweenInfo, {Size = UDim2.new(0, 0, 1, 0)})
-    tween:Play()
-
-    task.delay(duration, function()
-        if frame and frame.Parent then frame:Destroy() end
-    end)
-
-    local existing = self._notificationGui:GetChildren()
-    local offset = 0
-    local stepHeight = height + 8
-    for _, child in ipairs(existing) do
-        if child:IsA("Frame") and child ~= frame then
-            local newPos = child.Position + UDim2.new(0, 0, 0, -stepHeight)
-            TweenService:Create(child, TWEEN_FAST, {Position = newPos}):Play()
-            offset += stepHeight
-        end
-    end
-    frame.Position = UDim2.new(1, -(width + margin), 1, -(height + margin) - offset)
-
-    return frame
-end
-
--- ── Tab:AddKeybindPicker(text, defaultKey, callback, options) ─────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddKeybindPicker (with combination support)
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddKeybindPicker(text, defaultKey, callback, options)
     local theme = getTheme(self)
     options = options or {}
-    local toggleMode = options.Toggle or false
-    local currentState = options.DefaultState or false
+    local toggleMode    = options.Toggle or false
+    local allowCombos   = options.AllowCombos ~= false
+    local currentState  = options.DefaultState or false
+    local currentCallback = callback
+    local currentEnabled = true
 
-    local function keyToString(key)
-        if type(key) == "string" then return key end
-        if typeof(key) == "EnumItem" then return key.Name end
-        return "Unbound"
+    local modifierShort = {
+        LeftShift = "Shift", RightShift = "Shift",
+        LeftControl = "Ctrl", RightControl = "Ctrl",
+        LeftAlt = "Alt", RightAlt = "Alt",
+    }
+    local function isModifier(name) return modifierShort[name] ~= nil end
+
+    local function parseKeySpec(spec)
+        if not spec then return {"Unbound"} end
+        if typeof(spec) == "EnumItem" then return { spec.Name } end
+        if type(spec) == "table" then
+            local t = {}
+            for _, v in ipairs(spec) do
+                if typeof(v) == "EnumItem" then t[#t+1] = v.Name else t[#t+1] = tostring(v) end
+            end
+            return t
+        end
+        if type(spec) == "string" then
+            local t = {}
+            for part in spec:gmatch("[^+]+") do
+                t[#t+1] = (part:gsub("^%s+", ""):gsub("%s+$", ""))
+            end
+            return #t > 0 and t or {"Unbound"}
+        end
+        return {"Unbound"}
     end
 
-    local currentKeyStr = keyToString(defaultKey or "Unbound")
-    local isWaiting = false
+    local function currentModifiers()
+        local mods = {}
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift) then mods[#mods+1] = "Shift" end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then mods[#mods+1] = "Ctrl" end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt) then mods[#mods+1] = "Alt" end
+        return mods
+    end
+
+    local function comboToString(combo)
+        if not combo or #combo == 0 then return "Unbound" end
+        return table.concat(combo, "+")
+    end
+
+    local currentCombo = parseKeySpec(defaultKey or "Unbound")
+    local isWaiting    = false
     local pressConnection
 
     local container = Instance.new("Frame")
@@ -2320,7 +2472,6 @@ function TabComponent:AddKeybindPicker(text, defaultKey, callback, options)
     keyDisplay.Position = UDim2.new(0, label.Size.X.Offset + 8, 0, 0)
     keyDisplay.Size = UDim2.new(1, -(label.Size.X.Offset + 8 + 48), 1, 0)
     keyDisplay.Font = Enum.Font.RobotoMono
-    keyDisplay.TextColor3 = currentKeyStr == "Unbound" and theme.SubText or theme.Text
     keyDisplay.TextSize = 13
     keyDisplay.TextXAlignment = Enum.TextXAlignment.Center
     keyDisplay.Parent = container
@@ -2340,122 +2491,185 @@ function TabComponent:AddKeybindPicker(text, defaultKey, callback, options)
     applyBorder(bindBtn, theme.Border)
 
     local function updateDisplay()
-        if currentKeyStr == "Unbound" then
+        local display = comboToString(currentCombo)
+        if display == "Unbound" then
             keyDisplay.Text = "Unbound"
             keyDisplay.TextColor3 = theme.SubText
         else
             if toggleMode then
-                keyDisplay.Text = string.format("%s [%s]", currentKeyStr, currentState and "ON" or "OFF")
+                keyDisplay.Text = string.format("%s [%s]", display, currentState and "ON" or "OFF")
                 keyDisplay.TextColor3 = currentState and theme.Accent or theme.Text
             else
-                keyDisplay.Text = currentKeyStr
+                keyDisplay.Text = display
                 keyDisplay.TextColor3 = theme.Text
             end
         end
     end
     updateDisplay()
 
+    local function comboMatches(input)
+        local combo = currentCombo
+        if #combo == 0 or combo[1] == "Unbound" then return false end
+        local mainKey    = combo[#combo]
+        local modsNeeded = {}
+        for i = 1, #combo - 1 do modsNeeded[combo[i]] = true end
+
+        if mainKey:sub(1, 5) == "Mouse" then
+            local expectedType
+            if mainKey == "Mouse1" then expectedType = Enum.UserInputType.MouseButton1
+            elseif mainKey == "Mouse2" then expectedType = Enum.UserInputType.MouseButton2
+            elseif mainKey == "Mouse3" then expectedType = Enum.UserInputType.MouseButton3
+            elseif mainKey == "Mouse4" then expectedType = Enum.UserInputType.MouseButton4
+            elseif mainKey == "Mouse5" then expectedType = Enum.UserInputType.MouseButton5 end
+            if input.UserInputType ~= expectedType then return false end
+        else
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return false end
+            if input.KeyCode.Name ~= mainKey then
+                if not (modifierShort[input.KeyCode.Name] and modifierShort[input.KeyCode.Name] == mainKey) then
+                    return false
+                end
+            end
+        end
+        for modName in pairs(modsNeeded) do
+            local down = false
+            if modName == "Shift" then
+                down = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+            elseif modName == "Ctrl" then
+                down = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+            elseif modName == "Alt" then
+                down = UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt)
+            end
+            if not down then return false end
+        end
+        return true
+    end
+
     local function reconnectPressListener()
         if pressConnection then pressConnection:Disconnect(); pressConnection = nil end
-        if currentKeyStr == "Unbound" then return end
-
-        local targetKeyCode = nil
-        local targetMouse = nil
-        for _, name in pairs(Enum.KeyCode:GetEnumItems()) do
-            if name.Name == currentKeyStr then targetKeyCode = name; break end
-        end
-        if not targetKeyCode then
-            if currentKeyStr == "Mouse1" then targetMouse = Enum.UserInputType.MouseButton1
-            elseif currentKeyStr == "Mouse2" then targetMouse = Enum.UserInputType.MouseButton2
-            elseif currentKeyStr == "Mouse3" then targetMouse = Enum.UserInputType.MouseButton3
-            elseif currentKeyStr == "Mouse4" then targetMouse = Enum.UserInputType.MouseButton4
-            elseif currentKeyStr == "Mouse5" then targetMouse = Enum.UserInputType.MouseButton5
-            end
-        end
-
+        if currentCombo[1] == "Unbound" then return end
         pressConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
             if gameProcessed then return end
-            local match = false
-            if targetKeyCode and input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == targetKeyCode then
-                match = true
-            elseif targetMouse and input.UserInputType == targetMouse then
-                match = true
-            end
-            if match then
-                if toggleMode then
-                    currentState = not currentState
-                    updateDisplay()
-                    if callback then callback(currentKeyStr, currentState) end
-                else
-                    if callback then callback(currentKeyStr) end
-                end
+            if not currentEnabled then return end
+            if not comboMatches(input) then return end
+            if toggleMode then
+                currentState = not currentState
+                updateDisplay()
+                safeCall(currentCallback, comboToString(currentCombo), currentState)
+            else
+                safeCall(currentCallback, comboToString(currentCombo))
             end
         end)
     end
 
     bindBtn.MouseEnter:Connect(function()
-        if not isWaiting then bindBtn.BackgroundColor3 = theme.AccentHover end
+        if not isWaiting and currentEnabled then bindBtn.BackgroundColor3 = theme.AccentHover end
     end)
     bindBtn.MouseLeave:Connect(function()
         if not isWaiting then bindBtn.BackgroundColor3 = theme.Accent end
     end)
 
+    local function finalizeCombo(combo)
+        currentCombo = combo
+        bindBtn.Text = "Bind"
+        bindBtn.BackgroundColor3 = theme.Accent
+        isWaiting = false
+        updateDisplay()
+        reconnectPressListener()
+        if not toggleMode then safeCall(currentCallback, comboToString(currentCombo)) end
+    end
+
     bindBtn.MouseButton1Click:Connect(function()
-        if isWaiting then return end
+        if isWaiting or not currentEnabled then return end
         isWaiting = true
         bindBtn.Text = "..."
         bindBtn.BackgroundColor3 = theme.CheckOn
-        keyDisplay.Text = "Press any key..."
+        keyDisplay.Text = allowCombos and "Press key(s)..." or "Press a key..."
         keyDisplay.TextColor3 = theme.Accent
 
         local con
         con = UserInputService.InputBegan:Connect(function(input, gameProcessed)
             if gameProcessed then return end
-            local newKeyStr = nil
-            if input.UserInputType == Enum.UserInputType.Keyboard then
-                newKeyStr = input.KeyCode.Name
-            elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-                newKeyStr = "Mouse1"
-            elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-                newKeyStr = "Mouse2"
-            elseif input.UserInputType == Enum.UserInputType.MouseButton3 then
-                newKeyStr = "Mouse3"
-            elseif input.UserInputType == Enum.UserInputType.MouseButton4 then
-                newKeyStr = "Mouse4"
-            elseif input.UserInputType == Enum.UserInputType.MouseButton5 then
-                newKeyStr = "Mouse5"
-            end
-            if newKeyStr then
-                currentKeyStr = newKeyStr
-                bindBtn.Text = "Bind"
-                bindBtn.BackgroundColor3 = theme.Accent
-                isWaiting = false
+            local mouseMap = {
+                [Enum.UserInputType.MouseButton1] = "Mouse1",
+                [Enum.UserInputType.MouseButton2] = "Mouse2",
+                [Enum.UserInputType.MouseButton3] = "Mouse3",
+                [Enum.UserInputType.MouseButton4] = "Mouse4",
+                [Enum.UserInputType.MouseButton5] = "Mouse5",
+            }
+            if mouseMap[input.UserInputType] then
+                local mods = allowCombos and currentModifiers() or {}
+                mods[#mods+1] = mouseMap[input.UserInputType]
                 con:Disconnect()
-                updateDisplay()
-                reconnectPressListener()
-                if not toggleMode and callback then callback(currentKeyStr) end
+                finalizeCombo(mods)
+                return
+            end
+            if input.UserInputType == Enum.UserInputType.Keyboard then
+                local pressed = input.KeyCode.Name
+                if isModifier(pressed) then
+                    local shortName = modifierShort[pressed]
+                    local held = currentModifiers()
+                    local hasMod = false
+                    for _, m in ipairs(held) do if m == shortName then hasMod = true break end end
+                    if not hasMod then held[#held+1] = shortName end
+                    keyDisplay.Text = table.concat(held, "+") .. " + ..."
+                    return
+                end
+                local mods = allowCombos and currentModifiers() or {}
+                mods[#mods+1] = pressed
+                con:Disconnect()
+                finalizeCombo(mods)
             end
         end)
     end)
 
     reconnectPressListener()
 
+    if options.Tooltip then attachTooltip(bindBtn, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(container, text) end
+
     local pickerObj = {}
-    function pickerObj:GetKey() return currentKeyStr end
-    function pickerObj:SetKey(key)
-        currentKeyStr = keyToString(key)
-        updateDisplay()
-        reconnectPressListener()
+    function pickerObj:GetKey() return comboToString(currentCombo) end
+    function pickerObj:GetCombo()
+        local copy = {}
+        for i, v in ipairs(currentCombo) do copy[i] = v end
+        return copy
     end
+    function pickerObj:SetKey(spec) currentCombo = parseKeySpec(spec); updateDisplay(); reconnectPressListener() end
+    function pickerObj:SetCombo(tbl) pickerObj:SetKey(tbl) end
     function pickerObj:GetState() return currentState end
     function pickerObj:SetState(state)
         if toggleMode then currentState = state; updateDisplay() end
     end
-    function pickerObj:Destroy() container:Destroy(); if pressConnection then pressConnection:Disconnect() end end
+    function pickerObj:SetCallback(fn) currentCallback = fn end
+    function pickerObj:SetEnabled(state)
+        currentEnabled = state
+        bindBtn.Active = state
+        bindBtn.BackgroundColor3 = state and theme.Accent or disabledColor(theme.Accent)
+        keyDisplay.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+        label.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function pickerObj:IsEnabled() return currentEnabled end
+    function pickerObj:Destroy()
+        container:Destroy()
+        if pressConnection then pressConnection:Disconnect() end
+    end
+
+    local key = options.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(
+        key,
+        function() return { key = comboToString(currentCombo), state = currentState } end,
+        function(v)
+            pickerObj:SetKey(v.key)
+            if toggleMode then pickerObj:SetState(v.state) end
+        end
+    )
+
     return pickerObj
 end
 
--- ── Tab:AddViewport(title, options) ─────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddViewport
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddViewport(title, options)
     local theme = getTheme(self)
     options = options or {}
@@ -2500,10 +2714,8 @@ function TabComponent:AddViewport(title, options)
     local modelRadius = 5
 
     local rotationPresets = {
-        Front  = 0,
-        Back   = math.rad(180),
-        Left   = math.rad(90),
-        Right  = math.rad(-90),
+        Front  = 0, Back   = math.rad(180),
+        Left   = math.rad(90), Right  = math.rad(-90),
     }
     local currentAngle = rotationPresets[options.StartingRotation or "Front"] or 0
 
@@ -2559,40 +2771,36 @@ function TabComponent:AddViewport(title, options)
     local function loadModel(originalModel)
         if modelClone then modelClone:Destroy(); modelClone = nil end
         if typeof(originalModel) ~= "Instance" then return end
-
         local wasArchivable = originalModel.Archivable
         originalModel.Archivable = true
         local clone = originalModel:Clone()
         originalModel.Archivable = wasArchivable
         if not clone then return end
-
         local hum = clone:FindFirstChildOfClass("Humanoid")
         if hum then hum:Destroy() end
         for _, part in ipairs(clone:GetDescendants()) do
             if part:IsA("BasePart") then part.Anchored = true end
         end
         if clone:IsA("BasePart") then clone.Anchored = true end
-
         if clone:IsA("Model") then clone:PivotTo(CFrame.new())
         elseif clone:IsA("BasePart") then clone.CFrame = CFrame.new() end
-
         local bboxCenter, bboxSize
         if clone:IsA("Model") then bboxCenter, bboxSize = clone:GetBoundingBox()
         elseif clone:IsA("BasePart") then bboxCenter = clone.CFrame; bboxSize = clone.Size
         else bboxCenter = CFrame.new(); bboxSize = Vector3.new(2,2,2) end
-
         if bboxSize.Magnitude < 0.01 then bboxSize = Vector3.new(2,2,2) end
         modelRadius = math.max(bboxSize.X, bboxSize.Y, bboxSize.Z) * 1.5
         modelCenter = bboxCenter.Position
-
         clone.Parent = viewportFrame
         modelClone = clone
-
         updateCamera()
         startAutoRotate()
     end
 
     if options.Model then loadModel(options.Model) end
+
+    if options.Tooltip then attachTooltip(viewportFrame, options.Tooltip, self._window) end
+    if self._window and title ~= "" then self._window:_registerSearch(container, title) end
 
     local obj = {}
     function obj:SetModel(newModel) loadModel(newModel) end
@@ -2616,176 +2824,369 @@ function TabComponent:AddViewport(title, options)
     return obj
 end
 
--- ── RGui:ShowDialog(options) ────────────────────────────────────────────────
-function RGui:ShowDialog(options)
-    local theme = self._theme or RGui.DefaultTheme
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddTextToggle
+-- ════════════════════════════════════════════════════════════════════════════
+function TabComponent:AddTextToggle(text, default, callback, options)
+    local theme = getTheme(self)
     options = options or {}
+    local isOn = default or false
+    local onColor  = options.OnColor  or theme.TitleBg
+    local offColor = options.OffColor or theme.SubText
+    local currentCallback = callback
+    local currentEnabled = true
 
-    local dialogFrame = Instance.new("Frame")
-    dialogFrame.Size = UDim2.new(0, 350, 0, 160)
-    dialogFrame.Position = UDim2.new(0.5, -175, 0.5, -80)
-    dialogFrame.BackgroundColor3 = theme.WindowBg
-    dialogFrame.ZIndex = 100
-    dialogFrame.Parent = self._screen
-    applyCorner(dialogFrame, 4)
-    applyBorder(dialogFrame, theme.Border)
+    local lbl = Instance.new("TextButton")
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(1, 0, 0, 0)
+    lbl.LayoutOrder = self:_nextOrder()
+    lbl.Font = Enum.Font.RobotoMono
+    lbl.Text = text
+    lbl.TextColor3 = isOn and onColor or offColor
+    lbl.TextSize = options.TextSize or 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextWrapped = true
+    lbl.RichText = true
+    lbl.Parent = self._page
 
-    local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 22)
-    titleBar.BackgroundColor3 = theme.TitleBg
-    titleBar.ZIndex = 101
-    titleBar.Parent = dialogFrame
-    applyCorner(titleBar, 4)
+    lbl:GetPropertyChangedSignal("TextBounds"):Connect(function()
+        lbl.Size = UDim2.new(1, 0, 0, lbl.TextBounds.Y + 2)
+    end)
 
-    local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, -16, 1, 0)
-    titleLabel.Position = UDim2.new(0, 8, 0, 0)
-    titleLabel.BackgroundTransparency = 1
-    titleLabel.Text = options.Title or "Notice"
-    titleLabel.TextColor3 = theme.Text
-    titleLabel.Font = Enum.Font.RobotoMono
-    titleLabel.TextSize = 13
-    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    titleLabel.TextWrapped = true
-    titleLabel.ZIndex = 102
-    titleLabel.Parent = titleBar
+    lbl.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
+        isOn = not isOn
+        lbl.TextColor3 = isOn and onColor or offColor
+        safeCall(currentCallback, isOn)
+    end)
 
-    local msgLabel = Instance.new("TextLabel")
-    msgLabel.Size = UDim2.new(1, -16, 1, -70)
-    msgLabel.Position = UDim2.new(0, 8, 0, 32)
-    msgLabel.BackgroundTransparency = 1
-    msgLabel.Text = options.Message or ""
-    msgLabel.TextColor3 = theme.SubText
-    msgLabel.Font = Enum.Font.RobotoMono
-    msgLabel.TextSize = 13
-    msgLabel.TextWrapped = true
-    msgLabel.TextXAlignment = Enum.TextXAlignment.Left
-    msgLabel.TextYAlignment = Enum.TextYAlignment.Top
-    msgLabel.ZIndex = 102
-    msgLabel.Parent = dialogFrame
+    if options.Tooltip then attachTooltip(lbl, options.Tooltip, self._window) end
+    if self._window then self._window:_registerSearch(lbl, text) end
 
-    local buttonContainer = Instance.new("Frame")
-    buttonContainer.Size = UDim2.new(1, -16, 0, 24)
-    buttonContainer.Position = UDim2.new(0, 8, 1, -32)
-    buttonContainer.BackgroundTransparency = 1
-    buttonContainer.ZIndex = 102
-    buttonContainer.Parent = dialogFrame
+    local obj = {}
+    function obj:GetValue() return isOn end
+    function obj:SetValue(state)
+        isOn = state
+        lbl.TextColor3 = isOn and onColor or offColor
+        safeCall(currentCallback, isOn)
+    end
+    function obj:Toggle() obj:SetValue(not isOn) end
+    function obj:SetText(t) lbl.Text = t end
+    function obj:GetText() return lbl.Text end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        lbl.Active = state
+        if state then lbl.TextColor3 = isOn and onColor or offColor
+        else lbl.TextColor3 = disabledColor(isOn and onColor or offColor) end
+    end
+    function obj:IsEnabled() return currentEnabled end
+    function obj:Destroy() lbl:Destroy() end
+    function obj:GetInstance() return lbl end
 
-    local listLayout = Instance.new("UIListLayout")
-    listLayout.FillDirection = Enum.FillDirection.Horizontal
-    listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    listLayout.Padding = UDim.new(0, 8)
-    listLayout.Parent = buttonContainer
+    local key = options.StateKey or self._window:_autoStateKey("tab", text)
+    self._window:_registerState(key, function() return isOn end, function(v) obj:SetValue(v) end)
 
-    local buttons = options.Buttons or { { Text = "OK", Callback = function() end } }
+    return obj
+end
 
-    for i, btnData in ipairs(buttons) do
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 70, 1, 0)
-        btn.LayoutOrder = i
-        btn.BackgroundColor3 = theme.FrameBg
-        btn.Text = btnData.Text or "Button"
-        btn.TextColor3 = theme.Text
-        btn.Font = Enum.Font.RobotoMono
-        btn.TextSize = 13
-        btn.ZIndex = 103
-        btn.AutoButtonColor = false
-        btn.Parent = buttonContainer
-        applyCorner(btn, 2)
-        applyBorder(btn, theme.Border)
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddProgressBar
+-- ════════════════════════════════════════════════════════════════════════════
+function TabComponent:AddProgressBar(text, default, callback, options)
+    local theme = getTheme(self)
+    options = options or {}
+    local min       = options.Min       or 0
+    local max       = options.Max       or 100
+    local decimals  = options.Decimals  or 2
+    local barHeight = options.Height    or 20
+    local fillColor = options.FillColor or theme.SliderFill
+    local bgColor   = options.BackgroundColor or theme.SliderTrack
+    local txtColor  = options.TextColor or theme.Text
+    local currentCallback = callback
+    local currentEnabled = true
 
-        btn.MouseEnter:Connect(function() btn.BackgroundColor3 = theme.FrameBgHover end)
-        btn.MouseLeave:Connect(function() btn.BackgroundColor3 = theme.FrameBg end)
+    local value = math.clamp(default or min, min, max)
 
-        btn.MouseButton1Click:Connect(function()
-            if btnData.Callback then btnData.Callback() end
-            dialogFrame:Destroy()
+    local container = Instance.new("Frame")
+    container.BackgroundColor3 = bgColor
+    container.BorderSizePixel = 0
+    container.Size = UDim2.new(1, 0, 0, barHeight)
+    container.LayoutOrder = self:_nextOrder()
+    container.Parent = self._page
+    applyCorner(container, 2)
+    applyBorder(container, theme.Border)
+
+    local fill = Instance.new("Frame")
+    fill.BackgroundColor3 = fillColor
+    fill.BorderSizePixel = 0
+    fill.Size = UDim2.new((value - min) / (max - min), 0, 1, 0)
+    fill.Parent = container
+    applyCorner(fill, 2)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(1, 0, 1, 0)
+    lbl.Font = Enum.Font.RobotoMono
+    lbl.TextColor3 = txtColor
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Center
+    lbl.TextYAlignment = Enum.TextYAlignment.Center
+    lbl.RichText = true
+    lbl.ZIndex = 2
+    lbl.Parent = container
+
+    local function formatText()
+        local pct = (value - min) / (max - min) * 100
+        local label = text and (text .. " ") or ""
+        return string.format("%s%.2f%%", label, pct)
+    end
+    local function refresh()
+        local rel = (value - min) / (max - min)
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        lbl.Text = formatText()
+    end
+    refresh()
+
+    if options.Tooltip then attachTooltip(container, options.Tooltip, self._window) end
+    if self._window and text then self._window:_registerSearch(container, text) end
+
+    local obj = {}
+    function obj:GetValue() return value end
+    function obj:SetValue(val)
+        val = math.clamp(val, min, max)
+        value = val
+        refresh()
+        safeCall(currentCallback, value)
+    end
+    function obj:AddValue(delta) obj:SetValue(value + delta) end
+    function obj:SetPercent(pct) obj:SetValue(min + (max - min) * (pct / 100)) end
+    function obj:GetPercent() return (value - min) / (max - min) * 100 end
+    function obj:Reset() obj:SetValue(min) end
+    function obj:SetText(t) text = t; refresh() end
+    function obj:GetText() return text end
+    function obj:SetFillColor(color) fillColor = color; fill.BackgroundColor3 = color end
+    function obj:SetCallback(cb) currentCallback = cb end
+    function obj:SetEnabled(state)
+        currentEnabled = state
+        container.BackgroundColor3 = state and bgColor or disabledColor(bgColor)
+        fill.BackgroundColor3 = state and fillColor or disabledColor(fillColor)
+        lbl.TextColor3 = state and txtColor or disabledColor(txtColor)
+    end
+    function obj:IsEnabled() return currentEnabled end
+    function obj:Destroy() container:Destroy() end
+    function obj:GetInstance() return container end
+
+    local key = options.StateKey or self._window:_autoStateKey("tab", text or "progress")
+    self._window:_registerState(key, function() return value end, function(v) obj:SetValue(v) end)
+
+    return obj
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddImage
+-- ════════════════════════════════════════════════════════════════════════════
+function TabComponent:AddImage(imageId, options)
+    local theme = getTheme(self)
+    options = options or {}
+    if type(imageId) == "number" or tonumber(imageId) then
+        imageId = "rbxassetid://" .. tostring(imageId)
+    end
+    imageId = imageId or ""
+
+    local container = Instance.new("Frame")
+    container.BackgroundTransparency = 1
+    container.Size = options.Size or UDim2.new(0, 100, 0, 100)
+    container.LayoutOrder = self:_nextOrder()
+    container.Parent = self._page
+    applyCorner(container, options.CornerRadius or 2)
+    if options.Border and options.Border ~= false then applyBorder(container, theme.Border) end
+
+    local imgLabel = Instance.new("ImageLabel")
+    imgLabel.BackgroundTransparency = options.BackgroundTransparency or 1
+    imgLabel.Size = UDim2.new(1, 0, 1, 0)
+    imgLabel.Image = imageId
+    imgLabel.ScaleType = options.ScaleType or Enum.ScaleType.Fit
+    imgLabel.Parent = container
+    applyCorner(imgLabel, options.CornerRadius or 2)
+
+    if options.Tooltip then attachTooltip(imgLabel, options.Tooltip, self._window) end
+
+    local obj = {}
+    function obj:SetImage(id)
+        if type(id) == "number" or tonumber(id) then id = "rbxassetid://" .. tostring(id) end
+        imgLabel.Image = id
+    end
+    function obj:GetImage() return imgLabel.Image end
+    function obj:Update(opts)
+        opts = opts or {}
+        if opts.Size then container.Size = opts.Size end
+        if opts.ScaleType then imgLabel.ScaleType = opts.ScaleType end
+        if opts.BackgroundTransparency ~= nil then imgLabel.BackgroundTransparency = opts.BackgroundTransparency end
+        if opts.CornerRadius then
+            applyCorner(container, opts.CornerRadius)
+            applyCorner(imgLabel, opts.CornerRadius)
+        end
+    end
+    function obj:Destroy() container:Destroy() end
+    return obj
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddLayout
+-- ════════════════════════════════════════════════════════════════════════════
+function TabComponent:AddLayout(options)
+    local theme = getTheme(self)
+    options = options or {}
+    local style = options.Style or "Vertical"
+    local padding = options.Padding or 4
+
+    local container = Instance.new("Frame")
+    container.Name = "Layout_" .. style
+    container.BackgroundColor3 = options.BackgroundColor or theme.FrameBg
+    container.BackgroundTransparency = options.BackgroundTransparency or 1
+    container.BorderSizePixel = 0
+    container.LayoutOrder = self:_nextOrder()
+    container.ClipsDescendants = false
+    container.Parent = self._page
+
+    if style == "Horizontal" then
+        container.Size = options.Size or UDim2.new(1, 0, 0, 26)
+    elseif style == "Grid" then
+        container.Size = options.Size or UDim2.new(1, 0, 0, 100)
+    elseif style == "Absolute" then
+        container.Size = options.Size or UDim2.new(1, 0, 0, 200)
+    else
+        container.Size = options.Size or UDim2.new(1, 0, 0, 0)
+    end
+    container.Position = options.Position or UDim2.new(0, 0, 0, 0)
+
+    applyCorner(container, 2)
+    applyBorder(container, theme.Border)
+
+    local layout
+
+    if style == "Vertical" then
+        layout = Instance.new("UIListLayout")
+        layout.FillDirection = Enum.FillDirection.Vertical
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0, padding)
+        layout.Parent = container
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            container.Size = UDim2.new(container.Size.X.Scale, container.Size.X.Offset, 0, layout.AbsoluteContentSize.Y + padding * 2)
+        end)
+    elseif style == "Horizontal" then
+        layout = Instance.new("UIListLayout")
+        layout.FillDirection = Enum.FillDirection.Horizontal
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        layout.Padding = UDim.new(0, padding)
+        layout.Parent = container
+    elseif style == "Grid" then
+        layout = Instance.new("UIGridLayout")
+        layout.CellSize = options.CellSize or UDim2.new(0, 100, 0, 30)
+        layout.CellPadding = options.CellPadding or UDim2.new(0, 5, 0, 5)
+        layout.FillDirectionMaxCells = options.Columns or 2
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Parent = container
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            container.Size = UDim2.new(container.Size.X.Scale, container.Size.X.Offset, 0, layout.AbsoluteContentSize.Y + padding * 2)
         end)
     end
 
-    return dialogFrame
-end
+    local dummyTab = {
+        _page = container,
+        _window = self._window,
+        _layoutOrder = 0,
+    }
+    setmetatable(dummyTab, TabComponent)
 
--- ── RGui:ShowLoadingScreen(title) ──────────────────────────────────────────
-function RGui:ShowLoadingScreen(title)
-    local theme = self._theme or RGui.DefaultTheme
+    local layoutObj = {}
+    setmetatable(layoutObj, {
+        __index = function(_, methodName)
+            local method = dummyTab[methodName]
+            if type(method) ~= "function" then return method end
 
-    if self._mainFrame then self._mainFrame.Visible = false end
+            return function(_, ...)
+                local args = { ... }
 
-    local loadFrame = Instance.new("Frame")
-    loadFrame.Size = UDim2.new(0, 400, 0, 100)
-    loadFrame.Position = UDim2.new(0.5, -200, 0.5, -50)
-    loadFrame.BackgroundColor3 = theme.WindowBg
-    loadFrame.Parent = self._screen
-    applyCorner(loadFrame, 4)
-    applyBorder(loadFrame, theme.Border)
+                if style == "Horizontal" then
+                    local opts = args[#args]
+                    if type(opts) ~= "table" then
+                        opts = {}
+                        args[#args + 1] = opts
+                    end
+                    local size     = opts.Size or UDim2.new(0, 100, 1, 0)
+                    local position = opts.Position
+                    local anchor   = opts.AnchorPoint
+                    opts.Size, opts.Position, opts.AnchorPoint = nil, nil, nil
 
-    local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 22)
-    titleBar.BackgroundColor3 = theme.TitleBg
-    titleBar.Parent = loadFrame
-    applyCorner(titleBar, 4)
+                    local wrapper = Instance.new("Frame")
+                    wrapper.BackgroundTransparency = 1
+                    wrapper.Size = size
+                    wrapper.Position = position or UDim2.new(0, 0, 0, 0)
+                    wrapper.AnchorPoint = anchor or Vector2.new(0, 0)
+                    wrapper.Parent = container
 
-    local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, -16, 1, 0)
-    titleLabel.Position = UDim2.new(0, 8, 0, 0)
-    titleLabel.BackgroundTransparency = 1
-    titleLabel.Text = title or "Loading..."
-    titleLabel.TextColor3 = theme.Text
-    titleLabel.Font = Enum.Font.RobotoMono
-    titleLabel.TextSize = 13
-    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    titleLabel.RichText = true
-    titleLabel.TextWrapped = true
-    titleLabel.Parent = titleBar
+                    local originalPage = dummyTab._page
+                    dummyTab._page = wrapper
+                    local comp = method(dummyTab, table.unpack(args))
+                    dummyTab._page = originalPage
 
-    local statusLabel = Instance.new("TextLabel")
-    statusLabel.Size = UDim2.new(1, -16, 0, 20)
-    statusLabel.Position = UDim2.new(0, 8, 0, 36)
-    statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "Initializing..."
-    statusLabel.TextColor3 = theme.SubText
-    statusLabel.Font = Enum.Font.RobotoMono
-    statusLabel.TextSize = 13
-    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-    statusLabel.RichText = true
-    statusLabel.TextWrapped = true
-    statusLabel.Parent = loadFrame
+                    local inst = comp:GetInstance()
+                    inst.AnchorPoint = Vector2.new(0, 0)
+                    inst.Position = UDim2.new(0, 0, 0, 0)
+                    inst.Size = UDim2.new(1, 0, 1, 0)
 
-    local progressBg = Instance.new("Frame")
-    progressBg.Size = UDim2.new(1, -16, 0, 16)
-    progressBg.Position = UDim2.new(0, 8, 0, 64)
-    progressBg.BackgroundColor3 = theme.SliderTrack
-    progressBg.Parent = loadFrame
-    applyCorner(progressBg, 2)
-    applyBorder(progressBg, theme.Border)
+                    wrapper.LayoutOrder = dummyTab._layoutOrder
+                    dummyTab._layoutOrder = dummyTab._layoutOrder + 1
 
-    local progressFill = Instance.new("Frame")
-    progressFill.Size = UDim2.new(0, 0, 1, 0)
-    progressFill.BackgroundColor3 = theme.SliderFill
-    progressFill.BorderSizePixel = 0
-    progressFill.Parent = progressBg
-    applyCorner(progressFill, 2)
+                    return comp
+                end
 
-    local controller = {}
-    function controller:SetProgress(percent, newStatus)
-        percent = math.clamp(percent, 0, 100)
-        if newStatus then statusLabel.Text = newStatus end
-        TweenService:Create(progressFill, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            Size = UDim2.new(percent / 100, 0, 1, 0)
-        }):Play()
-        if percent >= 100 then
-            task.wait(0.5)
-            loadFrame:Destroy()
-            if self._screen then self._screen.Enabled = true end
-            if self._mainFrame then self._mainFrame.Visible = true end
+                if style == "Absolute" then
+                    local opts = args[#args]
+                    if type(opts) == "table" and (opts.Position or opts.Size or opts.AnchorPoint) then
+                        local wrapper = Instance.new("Frame")
+                        wrapper.BackgroundTransparency = 1
+                        wrapper.Position = opts.Position or UDim2.new(0, 0, 0, 0)
+                        wrapper.Size     = opts.Size     or UDim2.new(0, 100, 0, 24)
+                        wrapper.AnchorPoint = opts.AnchorPoint or Vector2.new(0, 0)
+                        wrapper.Parent = container
+
+                        opts.Position, opts.Size, opts.AnchorPoint = nil, nil, nil
+
+                        local originalPage = dummyTab._page
+                        dummyTab._page = wrapper
+                        local comp = method(dummyTab, table.unpack(args))
+                        dummyTab._page = originalPage
+
+                        local inst = comp:GetInstance()
+                        inst.AnchorPoint = Vector2.new(0, 0)
+                        inst.Position = UDim2.new(0, 0, 0, 0)
+                        inst.Size = UDim2.new(1, 0, 1, 0)
+
+                        return comp
+                    end
+                end
+
+                return method(dummyTab, table.unpack(args))
+            end
         end
-    end
-    return controller
+    })
+
+    function layoutObj:GetContainer() return container end
+    function layoutObj:SetSize(size) container.Size = size end
+    function layoutObj:SetPosition(pos) container.Position = pos end
+    function layoutObj:Destroy() container:Destroy() end
+
+    return layoutObj
 end
 
--- ── Tab:AddTable(headers, rows, options?) ──────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddTable
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddTable(headers, rows, options)
     local theme = getTheme(self)
     options = options or {}
@@ -2906,11 +3307,13 @@ function TabComponent:AddTable(headers, rows, options)
     return obj
 end
 
--- ── Tab:AddCollapsible(title) ──────────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════════════════════
+--  AddCollapsible
+-- ════════════════════════════════════════════════════════════════════════════
 function TabComponent:AddCollapsible(title)
-    local TweenService = cloneref(game:GetService("TweenService"))
     local theme = getTheme(self)
     local isOpen = true
+    local currentEnabled = true
 
     local container = Instance.new("Frame")
     container.BackgroundTransparency = 1
@@ -2932,7 +3335,7 @@ function TabComponent:AddCollapsible(title)
 
     local hoverTweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     headerBtn.MouseEnter:Connect(function()
-        TweenService:Create(headerBtn, hoverTweenInfo, {BackgroundColor3 = theme.FrameBgHover}):Play()
+        if currentEnabled then TweenService:Create(headerBtn, hoverTweenInfo, {BackgroundColor3 = theme.FrameBgHover}):Play() end
     end)
     headerBtn.MouseLeave:Connect(function()
         TweenService:Create(headerBtn, hoverTweenInfo, {BackgroundColor3 = theme.FrameBg}):Play()
@@ -2970,6 +3373,7 @@ function TabComponent:AddCollapsible(title)
     updateSize(true)
 
     headerBtn.MouseButton1Click:Connect(function()
+        if not currentEnabled then return end
         isOpen = not isOpen
         headerBtn.Text = (isOpen and " ▼ " or " ▶ ") .. title
         updateSize(false)
@@ -2983,7 +3387,7 @@ function TabComponent:AddCollapsible(title)
     setmetatable(dummyTab, TabComponent)
 
     local collapsible = {}
-    local proxyMetatable = {
+    setmetatable(collapsible, {
         __index = function(_, methodName)
             local method = dummyTab[methodName]
             if type(method) == "function" then
@@ -2991,29 +3395,683 @@ function TabComponent:AddCollapsible(title)
             end
             return method
         end
-    }
-    setmetatable(collapsible, proxyMetatable)
+    })
 
     function collapsible:Expand()
-        if not isOpen then headerBtn.MouseButton1Click:Fire() end
+        if not isOpen and currentEnabled then headerBtn.MouseButton1Click:Fire() end
     end
     function collapsible:Collapse()
-        if isOpen then headerBtn.MouseButton1Click:Fire() end
+        if isOpen and currentEnabled then headerBtn.MouseButton1Click:Fire() end
     end
-    function collapsible:Toggle() headerBtn.MouseButton1Click:Fire() end
+    function collapsible:Toggle()
+        if currentEnabled then headerBtn.MouseButton1Click:Fire() end
+    end
+    function collapsible:SetEnabled(state)
+        currentEnabled = state
+        headerBtn.Active = state
+        headerBtn.BackgroundColor3 = state and theme.FrameBg or disabledColor(theme.FrameBg)
+        headerBtn.TextColor3 = state and theme.Text or disabledColor(theme.Text)
+    end
+    function collapsible:IsEnabled() return currentEnabled end
     function collapsible:Destroy() container:Destroy() end
+
+    if self._window then self._window:_registerSearch(headerBtn, title) end
 
     return collapsible
 end
 
--- ── Window:Destroy() ────────────────────────────────────────────────────────
-function RGui:Destroy()
-    if self._watermark then self._watermark:Destroy() end
-    if self._notificationGui then self._notificationGui:Destroy() end
-    self._screen:Destroy()
+-- ════════════════════════════════════════════════════════════════════════════
+--  Watermark / KeySystem / Notify / Dialog / LoadingScreen
+-- ════════════════════════════════════════════════════════════════════════════
+function RGui:CreateWatermark(text, options)
+    local theme = self._theme
+    options = options or {}
+
+    local wmGui = Instance.new("ScreenGui")
+    wmGui.Name = "RGui_Watermark"
+    wmGui.ResetOnSpawn = false
+    wmGui.Parent = CoreGui
+
+    local wmFrame = Instance.new("Frame")
+    wmFrame.BackgroundColor3 = options.BackgroundColor or theme.TitleBg
+    wmFrame.BackgroundTransparency = options.BackgroundTransparency or 0.4
+    wmFrame.Position = options.Position or UDim2.new(0, 10, 0, 10)
+    wmFrame.Size = UDim2.new(0, 0, 0, 0)
+    wmFrame.Parent = wmGui
+    applyCorner(wmFrame, 2)
+    applyBorder(wmFrame, theme.Border)
+
+    local icon
+    if options.Icon then
+        icon = Instance.new("ImageLabel")
+        icon.BackgroundTransparency = 1
+        icon.Size = UDim2.new(0, 20, 0, 20)
+        icon.Position = UDim2.new(0, 4, 0.5, -10)
+        icon.Image = options.Icon
+        icon.Parent = wmFrame
+    end
+
+    local wmLabel = Instance.new("TextLabel")
+    wmLabel.BackgroundTransparency = 1
+    wmLabel.Font = Enum.Font.RobotoMono
+    wmLabel.Text = text
+    wmLabel.TextColor3 = options.TextColor or theme.Text
+    wmLabel.TextSize = options.TextSize or 13
+    wmLabel.TextXAlignment = Enum.TextXAlignment.Left
+    wmLabel.RichText = true
+    wmLabel.Parent = wmFrame
+
+    if icon then
+        wmLabel.Position = UDim2.new(0, 28, 0, 0)
+        wmLabel.Size = UDim2.new(1, -32, 1, 0)
+    else
+        wmLabel.Position = UDim2.new(0, 8, 0, 0)
+        wmLabel.Size = UDim2.new(1, -16, 1, 0)
+    end
+
+    local function updateSize()
+        local textBounds = TextService:GetTextSize(wmLabel.Text, wmLabel.TextSize, wmLabel.Font, Vector2.new(math.huge, math.huge))
+        wmFrame.Size = UDim2.new(0, textBounds.X + 16 + (icon and 24 or 0), 0, math.max(textBounds.Y + 8, 24))
+    end
+    updateSize()
+
+    makeDraggable(wmFrame, wmFrame)
+
+    local wmObj = {}
+    function wmObj:Update(newText, newOptions)
+        if newText ~= nil then wmLabel.Text = newText end
+        if newOptions then
+            if newOptions.Icon ~= nil then
+                if newOptions.Icon == "" or newOptions.Icon == false then
+                    if icon then icon:Destroy(); icon = nil; wmLabel.Position = UDim2.new(0, 8, 0, 0); wmLabel.Size = UDim2.new(1, -16, 1, 0) end
+                else
+                    if not icon then
+                        icon = Instance.new("ImageLabel"); icon.BackgroundTransparency = 1; icon.Size = UDim2.new(0, 20, 0, 20); icon.Position = UDim2.new(0, 4, 0.5, -10); icon.Parent = wmFrame
+                        wmLabel.Position = UDim2.new(0, 28, 0, 0); wmLabel.Size = UDim2.new(1, -32, 1, 0)
+                    end
+                    icon.Image = newOptions.Icon
+                end
+            end
+            if newOptions.TextColor then wmLabel.TextColor3 = newOptions.TextColor end
+            if newOptions.TextSize then wmLabel.TextSize = newOptions.TextSize end
+            if newOptions.BackgroundColor then wmFrame.BackgroundColor3 = newOptions.BackgroundColor end
+            if newOptions.BackgroundTransparency then wmFrame.BackgroundTransparency = newOptions.BackgroundTransparency end
+            if newOptions.Position then wmFrame.Position = newOptions.Position end
+            if newOptions.Font then wmLabel.Font = newOptions.Font end
+        end
+        updateSize()
+    end
+    function wmObj:Destroy() wmGui:Destroy() end
+    self._watermark = wmObj
+    return wmObj
 end
 
--- ── Lucide Icons Helpers ────────────────────────────────────────────────────
+function RGui:CreateKeySystem(config)
+    local theme = self._theme
+    local services = config.Services or {}
+    local description = config.Description or "Enter your key to continue."
+    local title = config.Title or "Key System"
+    local onSuccess = config.Callback or function() end
+
+    local serviceNames = {}
+    for name, data in pairs(services) do table.insert(serviceNames, name) end
+    if #serviceNames == 0 then
+        serviceNames = {"No service available"}
+        services = {["No service available"] = {Validate = function() return true end}}
+    end
+
+    local keyScreen = Instance.new("ScreenGui")
+    keyScreen.Name = "RGui_KeySystem"
+    keyScreen.ResetOnSpawn = false
+    keyScreen.Parent = CoreGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.BackgroundColor3 = theme.WindowBg
+    mainFrame.Position = UDim2.new(0.5, -200, 0.4, 0)
+    mainFrame.Size = UDim2.new(0, 400, 0, 180)
+    mainFrame.ClipsDescendants = false
+    mainFrame.Parent = keyScreen
+    applyCorner(mainFrame, 4)
+    applyBorder(mainFrame, theme.Border)
+
+    local titleBar = Instance.new("Frame")
+    titleBar.BackgroundColor3 = theme.TitleBg
+    titleBar.Size = UDim2.new(1, 0, 0, 24)
+    titleBar.Parent = mainFrame
+    applyCorner(titleBar, 4)
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Font = Enum.Font.RobotoMono
+    titleLbl.Text = " " .. title
+    titleLbl.TextColor3 = theme.Text
+    titleLbl.TextSize = 13
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.Parent = titleBar
+
+    if config.Icon then
+        local icon = Instance.new("ImageLabel")
+        icon.BackgroundTransparency = 1
+        icon.Size = UDim2.new(0, 20, 0, 20)
+        icon.Position = UDim2.new(0, 4, 0.5, -10)
+        icon.Image = config.Icon
+        icon.Parent = titleBar
+        titleLbl.Position = UDim2.new(0, 28, 0, 0)
+        titleLbl.Size = UDim2.new(1, -52, 1, 0)
+    else
+        titleLbl.Position = UDim2.new(0, 8, 0, 0)
+        titleLbl.Size = UDim2.new(1, -28, 1, 0)
+    end
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.BackgroundTransparency = 1
+    closeBtn.Position = UDim2.new(1, -20, 0, 0)
+    closeBtn.Size = UDim2.new(0, 20, 1, 0)
+    closeBtn.Font = Enum.Font.RobotoMono
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = theme.SubText
+    closeBtn.TextSize = 14
+    closeBtn.Parent = titleBar
+    closeBtn.MouseButton1Click:Connect(function() keyScreen:Destroy() end)
+
+    makeDraggable(mainFrame, titleBar)
+
+    local leftPanel = Instance.new("Frame")
+    leftPanel.BackgroundTransparency = 1
+    leftPanel.Position = UDim2.new(0, 8, 0, 30)
+    leftPanel.Size = UDim2.new(0, 180, 1, -38)
+    leftPanel.ClipsDescendants = false
+    leftPanel.Parent = mainFrame
+
+    local scriptTitle = Instance.new("TextLabel")
+    scriptTitle.BackgroundTransparency = 1
+    scriptTitle.Size = UDim2.new(1, 0, 0, 18)
+    scriptTitle.Font = Enum.Font.RobotoMono
+    scriptTitle.Text = config.ScriptTitle or "My Script"
+    scriptTitle.TextColor3 = theme.Accent
+    scriptTitle.TextSize = 13
+    scriptTitle.TextXAlignment = Enum.TextXAlignment.Left
+    scriptTitle.Parent = leftPanel
+
+    local inputRow = Instance.new("Frame")
+    inputRow.BackgroundTransparency = 1
+    inputRow.Position = UDim2.new(0, 0, 0, 26)
+    inputRow.Size = UDim2.new(1, 0, 0, 24)
+    inputRow.Parent = leftPanel
+
+    local keyInput = Instance.new("TextBox")
+    keyInput.BackgroundColor3 = theme.FrameBg
+    keyInput.Size = UDim2.new(1, -28, 1, 0)
+    keyInput.Font = Enum.Font.RobotoMono
+    keyInput.PlaceholderText = "Enter key..."
+    keyInput.PlaceholderColor3 = theme.SubText
+    keyInput.Text = ""
+    keyInput.TextColor3 = theme.Text
+    keyInput.TextSize = 13
+    keyInput.Parent = inputRow
+    applyCorner(keyInput, 2)
+    applyBorder(keyInput, theme.Border)
+
+    local copyBtn = Instance.new("TextButton")
+    copyBtn.BackgroundColor3 = theme.FrameBg
+    copyBtn.Size = UDim2.new(0, 24, 1, 0)
+    copyBtn.Position = UDim2.new(1, -24, 0, 0)
+    copyBtn.Font = Enum.Font.RobotoMono
+    copyBtn.Text = "📋"
+    copyBtn.TextColor3 = theme.Text
+    copyBtn.TextSize = 14
+    copyBtn.Visible = false
+    copyBtn.Parent = inputRow
+    applyCorner(copyBtn, 2)
+    applyBorder(copyBtn, theme.Border)
+
+    local selectedService = serviceNames[1]
+
+    copyBtn.MouseButton1Click:Connect(function()
+        local serviceData = services[selectedService]
+        local toCopy = serviceData.CopyLink or serviceData.CopyKey
+        if toCopy then
+            if setclipboard then setclipboard(toCopy)
+            elseif toclipboard then toclipboard(toCopy) end
+            copyBtn.BackgroundColor3 = theme.Accent
+            task.delay(0.2, function() copyBtn.BackgroundColor3 = theme.FrameBg end)
+            self:Notify("Copied!", "The key/link has been copied.", 2, { Color = theme.Accent })
+        end
+    end)
+
+    local serviceBtn = Instance.new("TextButton")
+    serviceBtn.BackgroundColor3 = theme.FrameBg
+    serviceBtn.Position = UDim2.new(0, 0, 0, 60)
+    serviceBtn.Size = UDim2.new(1, 0, 0, 24)
+    serviceBtn.Font = Enum.Font.RobotoMono
+    serviceBtn.Text = "  " .. serviceNames[1]
+    serviceBtn.TextColor3 = theme.Text
+    serviceBtn.TextSize = 13
+    serviceBtn.TextXAlignment = Enum.TextXAlignment.Left
+    serviceBtn.Parent = leftPanel
+    applyCorner(serviceBtn, 2)
+    applyBorder(serviceBtn, theme.Border)
+
+    local serviceList = Instance.new("Frame")
+    serviceList.BackgroundColor3 = theme.TabNormal
+    serviceList.Size = UDim2.new(0, 180, 0, 0)
+    serviceList.Visible = false
+    serviceList.ZIndex = 10
+    serviceList.Parent = mainFrame
+    applyBorder(serviceList, theme.Border)
+
+    local serviceLayout = Instance.new("UIListLayout")
+    serviceLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    serviceLayout.Parent = serviceList
+
+    local serviceButtons = {}
+    for i, srv in ipairs(serviceNames) do
+        local btn = Instance.new("TextButton")
+        btn.BackgroundTransparency = 1
+        btn.Size = UDim2.new(1, 0, 0, 22)
+        btn.Font = Enum.Font.RobotoMono
+        btn.Text = " " .. srv
+        btn.TextColor3 = theme.TabNormalText
+        btn.TextSize = 12
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.LayoutOrder = i
+        btn.ZIndex = 10
+        btn.Parent = serviceList
+
+        btn.MouseEnter:Connect(function() btn.TextColor3 = theme.Accent end)
+        btn.MouseLeave:Connect(function() btn.TextColor3 = theme.TabNormalText end)
+        btn.MouseButton1Click:Connect(function()
+            selectedService = srv
+            serviceBtn.Text = "  " .. srv
+            serviceList.Visible = false
+            TweenService:Create(serviceList, TWEEN_FAST, {Size = UDim2.new(0, 180, 0, 0)}):Play()
+            local data = services[srv]
+            copyBtn.Visible = data and (data.CopyLink or data.CopyKey) ~= nil
+            keyInput.Size = copyBtn.Visible and UDim2.new(1, -28, 1, 0) or UDim2.new(1, 0, 1, 0)
+        end)
+        serviceButtons[srv] = btn
+    end
+
+    local isServiceOpen = false
+    serviceBtn.MouseButton1Click:Connect(function()
+        isServiceOpen = not isServiceOpen
+        if isServiceOpen then
+            local absPos = serviceBtn.AbsolutePosition
+            local absSize = serviceBtn.AbsoluteSize
+            serviceList.Position = UDim2.new(0, absPos.X - mainFrame.AbsolutePosition.X,
+                                             0, absPos.Y + absSize.Y - mainFrame.AbsolutePosition.Y)
+            serviceList.Visible = true
+            local listHeight = #serviceNames * 22
+            TweenService:Create(serviceList, TWEEN_FAST, {Size = UDim2.new(0, 180, 0, listHeight)}):Play()
+        else
+            TweenService:Create(serviceList, TWEEN_FAST, {Size = UDim2.new(0, 180, 0, 0)}):Play()
+            task.delay(0.1, function() serviceList.Visible = false end)
+        end
+    end)
+
+    local submitBtn = Instance.new("TextButton")
+    submitBtn.BackgroundColor3 = theme.FrameBg
+    submitBtn.Position = UDim2.new(0, 0, 1, -28)
+    submitBtn.Size = UDim2.new(1, 0, 0, 24)
+    submitBtn.Font = Enum.Font.RobotoMono
+    submitBtn.Text = "Check Key"
+    submitBtn.TextColor3 = theme.Text
+    submitBtn.TextSize = 13
+    submitBtn.Parent = leftPanel
+    applyCorner(submitBtn, 2)
+    applyBorder(submitBtn, theme.Border)
+
+    submitBtn.MouseButton1Click:Connect(function()
+        local service = services[selectedService]
+        if service and service.Validate then
+            local key = keyInput.Text
+            if service.Validate(key) then
+                onSuccess(selectedService, key)
+                keyScreen:Destroy()
+            else
+                local origColor = keyInput.BackgroundColor3
+                keyInput.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+                task.delay(0.3, function() keyInput.BackgroundColor3 = origColor end)
+            end
+        end
+    end)
+
+    local rightPanel = Instance.new("Frame")
+    rightPanel.BackgroundColor3 = theme.FrameBg
+    rightPanel.Position = UDim2.new(0, 196, 0, 30)
+    rightPanel.Size = UDim2.new(0, 196, 1, -38)
+    rightPanel.Parent = mainFrame
+    applyCorner(rightPanel, 2)
+    applyBorder(rightPanel, theme.Border)
+
+    local descLabel = Instance.new("TextLabel")
+    descLabel.BackgroundTransparency = 1
+    descLabel.Position = UDim2.new(0, 6, 0, 6)
+    descLabel.Size = UDim2.new(1, -12, 1, -12)
+    descLabel.Font = Enum.Font.RobotoMono
+    descLabel.Text = description
+    descLabel.TextColor3 = theme.SubText
+    descLabel.TextSize = 12
+    descLabel.TextWrapped = true
+    descLabel.Parent = rightPanel
+
+    local initialData = services[selectedService]
+    if initialData and (initialData.CopyLink or initialData.CopyKey) then
+        copyBtn.Visible = true
+        keyInput.Size = UDim2.new(1, -28, 1, 0)
+    end
+
+    local keySys = {}
+    function keySys:Destroy() keyScreen:Destroy() end
+    return keySys
+end
+
+function RGui:Notify(title, message, duration, options)
+    local theme = self._theme
+    duration = duration or 3
+    options = options or {}
+
+    if not self._notificationGui then
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "RGui_Notifications"
+        gui.ResetOnSpawn = false
+        gui.Parent = CoreGui
+        self._notificationGui = gui
+    end
+
+    local width, height, headerHeight, margin = 240, 75, 22, 10
+
+    local frame = Instance.new("Frame")
+    frame.BackgroundColor3 = options.BackgroundColor or theme.NotifyBg
+    frame.BorderSizePixel = 0
+    frame.Size = UDim2.new(0, width, 0, height)
+    frame.ClipsDescendants = true
+    frame.Parent = self._notificationGui
+    applyCorner(frame, 2)
+    applyBorder(frame, theme.Border)
+
+    local titleBar = Instance.new("Frame")
+    titleBar.BackgroundColor3 = options.Color or theme.TitleBg
+    titleBar.BorderSizePixel = 0
+    titleBar.Size = UDim2.new(1, 0, 0, headerHeight)
+    titleBar.Parent = frame
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Font = Enum.Font.RobotoMono
+    titleLabel.Text = title or "Notification"
+    titleLabel.TextColor3 = options.TitleColor or theme.NotifyTitle
+    titleLabel.TextSize = 13
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Position = UDim2.new(0, 8, 0, 0)
+    titleLabel.Size = UDim2.new(1, -30, 1, 0)
+    titleLabel.Parent = titleBar
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.BackgroundTransparency = 1
+    closeBtn.Position = UDim2.new(1, -headerHeight, 0, 0)
+    closeBtn.Size = UDim2.new(0, headerHeight, 0, headerHeight)
+    closeBtn.Font = Enum.Font.RobotoMono
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = theme.SubText
+    closeBtn.TextSize = 16
+    closeBtn.Parent = titleBar
+    closeBtn.MouseEnter:Connect(function() closeBtn.TextColor3 = theme.Text end)
+    closeBtn.MouseLeave:Connect(function() closeBtn.TextColor3 = theme.SubText end)
+    closeBtn.MouseButton1Click:Connect(function() frame:Destroy() end)
+
+    local msgLabel = Instance.new("TextLabel")
+    msgLabel.BackgroundTransparency = 1
+    msgLabel.Font = Enum.Font.RobotoMono
+    msgLabel.Text = message or ""
+    msgLabel.TextColor3 = options.MessageColor or theme.NotifyMsg
+    msgLabel.TextSize = 13
+    msgLabel.TextWrapped = true
+    msgLabel.TextXAlignment = Enum.TextXAlignment.Left
+    msgLabel.TextYAlignment = Enum.TextYAlignment.Top
+    msgLabel.Position = UDim2.new(0, 8, 0, headerHeight + 6)
+    msgLabel.Size = UDim2.new(1, -16, 1, -(headerHeight + 12))
+    msgLabel.Parent = frame
+
+    local timerBarBg = Instance.new("Frame")
+    timerBarBg.BackgroundColor3 = theme.Border
+    timerBarBg.BorderSizePixel = 0
+    timerBarBg.Size = UDim2.new(1, 0, 0, 2)
+    timerBarBg.Position = UDim2.new(0, 0, 1, -2)
+    timerBarBg.Parent = frame
+
+    local timerBar = Instance.new("Frame")
+    timerBar.BackgroundColor3 = options.Color or theme.Accent
+    timerBar.BorderSizePixel = 0
+    timerBar.Size = UDim2.new(1, 0, 1, 0)
+    timerBar.Parent = timerBarBg
+
+    TweenService:Create(timerBar, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 1, 0)}):Play()
+
+    task.delay(duration, function()
+        if frame and frame.Parent then frame:Destroy() end
+    end)
+
+    local existing = self._notificationGui:GetChildren()
+    local offset = 0
+    local stepHeight = height + 8
+    for _, child in ipairs(existing) do
+        if child:IsA("Frame") and child ~= frame then
+            TweenService:Create(child, TWEEN_FAST, {Position = child.Position + UDim2.new(0, 0, 0, -stepHeight)}):Play()
+            offset += stepHeight
+        end
+    end
+    frame.Position = UDim2.new(1, -(width + margin), 1, -(height + margin) - offset)
+
+    return frame
+end
+
+function RGui:ShowDialog(options)
+    local theme = self._theme or RGui.DefaultTheme
+    options = options or {}
+
+    local dialogFrame = Instance.new("Frame")
+    dialogFrame.Size = UDim2.new(0, 350, 0, 160)
+    dialogFrame.Position = UDim2.new(0.5, -175, 0.5, -80)
+    dialogFrame.BackgroundColor3 = theme.WindowBg
+    dialogFrame.ZIndex = 100
+    dialogFrame.Parent = self._screen
+    applyCorner(dialogFrame, 4)
+    applyBorder(dialogFrame, theme.Border)
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 22)
+    titleBar.BackgroundColor3 = theme.TitleBg
+    titleBar.ZIndex = 101
+    titleBar.Parent = dialogFrame
+    applyCorner(titleBar, 4)
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -16, 1, 0)
+    titleLabel.Position = UDim2.new(0, 8, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = options.Title or "Notice"
+    titleLabel.TextColor3 = theme.Text
+    titleLabel.Font = Enum.Font.RobotoMono
+    titleLabel.TextSize = 13
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.TextWrapped = true
+    titleLabel.ZIndex = 102
+    titleLabel.Parent = titleBar
+
+    local msgLabel = Instance.new("TextLabel")
+    msgLabel.Size = UDim2.new(1, -16, 1, -70)
+    msgLabel.Position = UDim2.new(0, 8, 0, 32)
+    msgLabel.BackgroundTransparency = 1
+    msgLabel.Text = options.Message or ""
+    msgLabel.TextColor3 = theme.SubText
+    msgLabel.Font = Enum.Font.RobotoMono
+    msgLabel.TextSize = 13
+    msgLabel.TextWrapped = true
+    msgLabel.TextXAlignment = Enum.TextXAlignment.Left
+    msgLabel.TextYAlignment = Enum.TextYAlignment.Top
+    msgLabel.ZIndex = 102
+    msgLabel.Parent = dialogFrame
+
+    local buttonContainer = Instance.new("Frame")
+    buttonContainer.Size = UDim2.new(1, -16, 0, 24)
+    buttonContainer.Position = UDim2.new(0, 8, 1, -32)
+    buttonContainer.BackgroundTransparency = 1
+    buttonContainer.ZIndex = 102
+    buttonContainer.Parent = dialogFrame
+
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.FillDirection = Enum.FillDirection.Horizontal
+    listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Padding = UDim.new(0, 8)
+    listLayout.Parent = buttonContainer
+
+    local buttons = options.Buttons or { { Text = "OK", Callback = function() end } }
+
+    for i, btnData in ipairs(buttons) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 70, 1, 0)
+        btn.LayoutOrder = i
+        btn.BackgroundColor3 = theme.FrameBg
+        btn.Text = btnData.Text or "Button"
+        btn.TextColor3 = theme.Text
+        btn.Font = Enum.Font.RobotoMono
+        btn.TextSize = 13
+        btn.ZIndex = 103
+        btn.AutoButtonColor = false
+        btn.Parent = buttonContainer
+        applyCorner(btn, 2)
+        applyBorder(btn, theme.Border)
+        btn.MouseEnter:Connect(function() btn.BackgroundColor3 = theme.FrameBgHover end)
+        btn.MouseLeave:Connect(function() btn.BackgroundColor3 = theme.FrameBg end)
+        btn.MouseButton1Click:Connect(function()
+            safeCall(btnData.Callback)
+            dialogFrame:Destroy()
+        end)
+    end
+
+    return dialogFrame
+end
+
+function RGui:ShowLoadingScreen(title)
+    local theme = self._theme or RGui.DefaultTheme
+    if self._mainFrame then self._mainFrame.Visible = false end
+
+    local loadFrame = Instance.new("Frame")
+    loadFrame.Size = UDim2.new(0, 400, 0, 100)
+    loadFrame.Position = UDim2.new(0.5, -200, 0.5, -50)
+    loadFrame.BackgroundColor3 = theme.WindowBg
+    loadFrame.Parent = self._screen
+    applyCorner(loadFrame, 4)
+    applyBorder(loadFrame, theme.Border)
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 22)
+    titleBar.BackgroundColor3 = theme.TitleBg
+    titleBar.Parent = loadFrame
+    applyCorner(titleBar, 4)
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -16, 1, 0)
+    titleLabel.Position = UDim2.new(0, 8, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = title or "Loading..."
+    titleLabel.TextColor3 = theme.Text
+    titleLabel.Font = Enum.Font.RobotoMono
+    titleLabel.TextSize = 13
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.RichText = true
+    titleLabel.TextWrapped = true
+    titleLabel.Parent = titleBar
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, -16, 0, 20)
+    statusLabel.Position = UDim2.new(0, 8, 0, 36)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "Initializing..."
+    statusLabel.TextColor3 = theme.SubText
+    statusLabel.Font = Enum.Font.RobotoMono
+    statusLabel.TextSize = 13
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.RichText = true
+    statusLabel.TextWrapped = true
+    statusLabel.Parent = loadFrame
+
+    local progressBg = Instance.new("Frame")
+    progressBg.Size = UDim2.new(1, -16, 0, 16)
+    progressBg.Position = UDim2.new(0, 8, 0, 64)
+    progressBg.BackgroundColor3 = theme.SliderTrack
+    progressBg.Parent = loadFrame
+    applyCorner(progressBg, 2)
+    applyBorder(progressBg, theme.Border)
+
+    local progressFill = Instance.new("Frame")
+    progressFill.Size = UDim2.new(0, 0, 1, 0)
+    progressFill.BackgroundColor3 = theme.SliderFill
+    progressFill.BorderSizePixel = 0
+    progressFill.Parent = progressBg
+    applyCorner(progressFill, 2)
+
+    local controller = {}
+    function controller:SetProgress(percent, newStatus)
+        percent = math.clamp(percent, 0, 100)
+        if newStatus then statusLabel.Text = newStatus end
+        TweenService:Create(progressFill, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.new(percent / 100, 0, 1, 0)
+        }):Play()
+        if percent >= 100 then
+            task.wait(0.5)
+            loadFrame:Destroy()
+            if self._screen then self._screen.Enabled = true end
+            if self._mainFrame then self._mainFrame.Visible = true end
+        end
+    end
+    return controller
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+--  SetTheme / Lucide / Config / Destroy
+-- ════════════════════════════════════════════════════════════════════════════
+function RGui:SetTheme(newTheme)
+    local oldTheme = self._theme
+    local merged = {}
+    for k, v in pairs(RGui.DefaultTheme) do merged[k] = v end
+    if newTheme then for k, v in pairs(newTheme) do merged[k] = v end end
+    self._theme = merged
+
+    local oldMap = {}
+    for key, col in pairs(oldTheme) do
+        if typeof(col) == "Color3" then oldMap[col] = key end
+    end
+
+    local function scan(instance)
+        if instance:IsA("GuiObject") then
+            local key = oldMap[instance.BackgroundColor3]
+            if key and merged[key] then instance.BackgroundColor3 = merged[key] end
+
+            if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+                local txtKey = oldMap[instance.TextColor3]
+                if txtKey and merged[txtKey] then instance.TextColor3 = merged[txtKey] end
+            end
+
+            if instance:IsA("TextBox") then
+                local phKey = oldMap[instance.PlaceholderColor3]
+                if phKey and merged[phKey] then instance.PlaceholderColor3 = merged[phKey] end
+            end
+
+            local stroke = instance:FindFirstChildOfClass("UIStroke")
+            if stroke then
+                local strokeKey = oldMap[stroke.Color]
+                if strokeKey and merged[strokeKey] then stroke.Color = merged[strokeKey] end
+            end
+        end
+        for _, child in ipairs(instance:GetChildren()) do scan(child) end
+    end
+
+    if self._mainFrame then scan(self._mainFrame) end
+end
+
 RGui.Lucide = nil
 function RGui:LoadLucide()
     if not RGui.Lucide then
@@ -3029,9 +4087,7 @@ function RGui:GetLucideIcon(name, options)
     return lucide:geticon(name, options or {})
 end
 
--- ── File‑Based Configuration API ────────────────────────────────────────────
 RGui.Config = {}
-
 function RGui.Config.new(folder, filename)
     folder = folder or "Axiom"
     filename = filename or "config.json"
@@ -3040,10 +4096,7 @@ function RGui.Config.new(folder, filename)
     local self = {}
     self._data = {}
 
-    -- Ensure folder exists
-    if not isfolder(folder) then
-        makefolder(folder)
-    end
+    if isfolder and not isfolder(folder) then makefolder(folder) end
 
     local function saveToStorage(tbl)
         local json = HttpService:JSONEncode(tbl)
@@ -3051,297 +4104,30 @@ function RGui.Config.new(folder, filename)
     end
 
     local function loadFromStorage()
-        if not isfile(fullPath) then
-            return {}
-        end
+        if not isfile(fullPath) then return {} end
         local json = readfile(fullPath)
         local success, decoded = pcall(function() return HttpService:JSONDecode(json) end)
-        if success and type(decoded) == "table" then
-            return decoded
-        end
+        if success and type(decoded) == "table" then return decoded end
         return {}
     end
 
-    function self:Set(key, value)
-        self._data[key] = value
-    end
-
-    function self:Get(key)
-        return self._data[key]
-    end
-
-    function self:Save()
-        saveToStorage(self._data)
-    end
-
-    function self:Load()
-        self._data = loadFromStorage()
-        return self._data
-    end
-
+    function self:Set(key, value) self._data[key] = value end
+    function self:Get(key) return self._data[key] end
+    function self:Save() saveToStorage(self._data) end
+    function self:Load() self._data = loadFromStorage(); return self._data end
     function self:BindCheckbox(tab, key, text, default)
-        local cfg = self
-        local saved = cfg:Get(key)
+        local saved = self:Get(key)
         local initial = saved ~= nil and saved or default
-        return tab:AddCheckbox(text, initial, function(value)
-            cfg:Set(key, value)
-        end)
+        return tab:AddCheckbox(text, initial, function(value) self:Set(key, value) end)
     end
-
     return self
 end
 
--- ── Window:SetTheme(newTheme) ──────────────────────────────────────────────
-function RGui:SetTheme(newTheme)
-    local oldTheme = self._theme
-
-    local merged = {}
-    for k, v in pairs(RGui.DefaultTheme) do merged[k] = v end
-    if newTheme then
-        for k, v in pairs(newTheme) do merged[k] = v end
-    end
-    self._theme = merged
-
-    local oldMap = {}
-    for key, col in pairs(oldTheme) do
-        if typeof(col) == "Color3" then
-            oldMap[col] = key
-        end
-    end
-
-    local function scan(instance)
-        if instance:IsA("GuiObject") then
-            local oldBg = instance.BackgroundColor3
-            local key = oldMap[oldBg]
-            if key and merged[key] then
-                instance.BackgroundColor3 = merged[key]
-            end
-
-            if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-                local oldTxt = instance.TextColor3
-                local txtKey = oldMap[oldTxt]
-                if txtKey and merged[txtKey] then
-                    instance.TextColor3 = merged[txtKey]
-                end
-            end
-
-            if instance:IsA("TextBox") then
-                local oldPH = instance.PlaceholderColor3
-                local phKey = oldMap[oldPH]
-                if phKey and merged[phKey] then
-                    instance.PlaceholderColor3 = merged[phKey]
-                end
-            end
-
-            local stroke = instance:FindFirstChildOfClass("UIStroke")
-            if stroke then
-                local oldStroke = stroke.Color
-                local strokeKey = oldMap[oldStroke]
-                if strokeKey and merged[strokeKey] then
-                    stroke.Color = merged[strokeKey]
-                end
-            end
-        end
-
-        for _, child in ipairs(instance:GetChildren()) do
-            scan(child)
-        end
-    end
-
-    if self._mainFrame then
-        scan(self._mainFrame)
-    end
-end
-
--- ── Tab:AddImage(imageId, options) ──────────────────────────────────────────
-function TabComponent:AddImage(imageId, options)
-    local theme = getTheme(self)
-    options = options or {}          -- ✅ guard against nil
-    -- ✅ accept numbers, string numbers, or full rbxassetid URLs
-    if type(imageId) == "number" or tonumber(imageId) then
-        imageId = "rbxassetid://" .. tostring(imageId)
-    end
-    imageId = imageId or ""
-
-    local container = Instance.new("Frame")
-    container.BackgroundTransparency = 1
-    container.Size = options.Size or UDim2.new(0, 100, 0, 100)
-    container.LayoutOrder = self:_nextOrder()
-    container.Parent = self._page
-    applyCorner(container, options.CornerRadius or 2)
-    if options.Border and options.Border ~= false then
-        applyBorder(container, theme.Border)
-    end
-
-    local imgLabel = Instance.new("ImageLabel")
-    imgLabel.BackgroundTransparency = options.BackgroundTransparency or 1
-    imgLabel.Size = UDim2.new(1, 0, 1, 0)
-    imgLabel.Image = imageId
-    imgLabel.ScaleType = options.ScaleType or Enum.ScaleType.Fit
-    imgLabel.Parent = container
-    applyCorner(imgLabel, options.CornerRadius or 2)
-
-    local obj = {}
-    function obj:SetImage(id)
-        if type(id) == "number" or tonumber(id) then
-            id = "rbxassetid://" .. tostring(id)
-        end
-        imgLabel.Image = id
-    end
-    function obj:GetImage()
-        return imgLabel.Image
-    end
-    function obj:Update(opts)
-        opts = opts or {}   -- ✅ guard against nil
-        if opts.Size then container.Size = opts.Size end
-        if opts.ScaleType then imgLabel.ScaleType = opts.ScaleType end
-        if opts.BackgroundTransparency ~= nil then
-            imgLabel.BackgroundTransparency = opts.BackgroundTransparency
-        end
-        if opts.CornerRadius then
-            applyCorner(container, opts.CornerRadius)
-            applyCorner(imgLabel, opts.CornerRadius)
-        end
-    end
-    function obj:Destroy()
-        container:Destroy()
-    end
-    return obj
-end
-
--- ── Tab:AddLayout(options) ─────────────────────────────────────────────────
--- Returns a Layout object that can contain components arranged in different ways.
--- options.Style: "Vertical" (default), "Horizontal", "Grid", "Absolute"
--- options.Size, options.Position, options.BackgroundColor, etc.
-function TabComponent:AddLayout(options)
-    local theme = getTheme(self)
-    options = options or {}
-    local style = options.Style or "Vertical"
-
-    local container = Instance.new("Frame")
-    container.BackgroundTransparency = options.BackgroundTransparency or 1
-    container.BackgroundColor3 = options.BackgroundColor or theme.FrameBg
-    container.Size = options.Size or UDim2.new(1, -16, 0, 0)  -- auto height later
-    container.Position = options.Position or UDim2.new(0, 8, 0, 0)
-    container.LayoutOrder = self:_nextOrder()
-    container.ClipsDescendants = true
-    container.Parent = self._page
-    applyCorner(container, 2)
-    applyBorder(container, theme.Border)
-
-    -- Internal layout mechanism
-    local layout
-    if style == "Vertical" or style == "Horizontal" then
-        layout = Instance.new("UIListLayout")
-        layout.FillDirection = style == "Vertical" and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
-        layout.SortOrder = Enum.SortOrder.LayoutOrder
-        layout.Padding = UDim.new(0, 4)
-        layout.Parent = container
-    elseif style == "Grid" then
-        layout = Instance.new("UIGridLayout")
-        layout.CellSize = options.CellSize or UDim2.new(0, 100, 0, 30)
-        layout.CellPadding = options.CellPadding or UDim2.new(0, 5, 0, 5)
-        layout.FillDirectionMaxCells = options.Columns or 2
-        layout.Parent = container
-    elseif style == "Absolute" then
-    end
-
-    -- Auto-resize container height for vertical/horizontal lists (based on content)
-    if layout and layout:IsA("UIListLayout") then
-        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-            if style == "Vertical" then
-                container.Size = UDim2.new(container.Size.X.Scale, container.Size.X.Offset, 0, layout.AbsoluteContentSize.Y + 8)
-            else
-                container.Size = UDim2.new(0, layout.AbsoluteContentSize.X + 8, container.Size.Y.Scale, container.Size.Y.Offset)
-            end
-        end)
-    elseif layout and layout:IsA("UIGridLayout") then
-        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-            container.Size = UDim2.new(container.Size.X.Scale, container.Size.X.Offset, 0, layout.AbsoluteContentSize.Y + 8)
-        end)
-    end
-
-    -- Layout wrapper object
-    local layoutObj = {}
-    local nextOrder = 0   -- for components that don't use absolute positioning
-
-    local function addComponent(createFunc, compOptions)
-        compOptions = compOptions or {}
-        local comp
-        if style == "Absolute" then
-            -- Component must be created with explicit Position/Size/AnchorPoint
-            comp = createFunc(container, compOptions)
-        else
-            -- Normal adding via UIListLayout/Grid; we use LayoutOrder
-            comp = createFunc(container, compOptions)
-            if comp and comp.GetInstance then
-                comp:GetInstance().LayoutOrder = nextOrder
-                nextOrder = nextOrder + 1
-            end
-        end
-        return comp
-    end
-
-    local dummyTab = {
-        _page = container,
-        _window = self._window,
-        _layoutOrder = 0
-    }
-    setmetatable(dummyTab, TabComponent)
-
-    setmetatable(layoutObj, {
-        __index = function(_, methodName)
-            local method = dummyTab[methodName]
-            if type(method) == "function" then
-                return function(_, ...)
-                    if style == "Absolute" then
-                        local args = {...}
-                        local opts = args[#args]   
-                        if type(opts) == "table" and (opts.Position or opts.Size or opts.AnchorPoint) then
-                        else
-                            opts = {}
-                            args[#args+1] = opts
-                        end
-                        opts.AnchorPoint = opts.AnchorPoint or Vector2.new(0, 0)
-                        opts.Position = opts.Position or UDim2.new(0, 0, 0, 0)
-                        opts.Size = opts.Size or UDim2.new(0, 100, 0, 24)
-                        return method(dummyTab, unpack(args))
-                    else
-                        return method(dummyTab, ...)
-                    end
-                end
-            end
-            return method
-        end
-    })
-
-    function layoutObj:SetStyle(newStyle, styleOptions)
-        if layout then
-            layout:Destroy()
-            layout = nil
-        end
-        style = newStyle
-        if style == "Vertical" or style == "Horizontal" then
-            layout = Instance.new("UIListLayout")
-            layout.FillDirection = style == "Vertical" and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
-            layout.SortOrder = Enum.SortOrder.LayoutOrder
-            layout.Padding = UDim.new(0, 4)
-            layout.Parent = container
-        elseif style == "Grid" then
-            local gridOpts = styleOptions or {}
-            layout = Instance.new("UIGridLayout")
-            layout.CellSize = gridOpts.CellSize or UDim2.new(0, 100, 0, 30)
-            layout.CellPadding = gridOpts.CellPadding or UDim2.new(0, 5, 0, 5)
-            layout.FillDirectionMaxCells = gridOpts.Columns or 2
-            layout.Parent = container
-        end
-    end
-
-    function layoutObj:Destroy()
-        container:Destroy()
-    end
-
-    return layoutObj
+function RGui:Destroy()
+    if self._watermark then self._watermark:Destroy() end
+    if self._notificationGui then self._notificationGui:Destroy() end
+    if tooltipGui then tooltipGui:Destroy(); tooltipGui = nil end
+    self._screen:Destroy()
 end
 
 return RGui
